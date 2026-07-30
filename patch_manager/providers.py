@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 import socket
 import uuid
@@ -16,6 +17,8 @@ from .db import Database, utcnow
 from .secret_store import SecretStore
 
 
+logger = logging.getLogger(__name__)
+
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
 
@@ -24,6 +27,21 @@ def normalize_mac(value: str | None) -> str | None:
         return None
     match = MAC_RE.search(value.replace("-", ":"))
     return match.group(0).lower() if match else None
+
+
+def is_ip_literal(value: Any) -> bool:
+    try:
+        ipaddress.ip_address(str(value).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def reverse_hostname(ip: str) -> str | None:
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except (socket.herror, socket.gaierror, TimeoutError):
+        return None
 
 
 class ProviderManager:
@@ -41,6 +59,7 @@ class ProviderManager:
                 await self.sync_one(provider["id"])
             except Exception:
                 # Per-provider failures are persisted and must not stop other collectors.
+                logger.exception("Synchronisatie van provider %s is mislukt", provider["id"])
                 continue
 
     async def sync_one(self, provider_id: str) -> dict[str, Any]:
@@ -127,7 +146,7 @@ class ProviderManager:
                         (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, now, now, entity_id),
                     )
             else:
-                self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
+                self._record_manual_conflicts(entity, provider_id, {"name": name, "mac_address": mac_address})
                 with self.database.transaction() as connection:
                     connection.execute(
                         "UPDATE entities SET status=?,status_updated_at=?,last_seen_at=? WHERE id=?",
@@ -161,7 +180,8 @@ class ProviderManager:
             for field, value in {"status": status, "ip_address": ip_address, "hostname": hostname}.items():
                 if value is not None:
                     connection.execute(
-                        "INSERT INTO observations VALUES(?,?,?,?,?,?,?,?)",
+                        """INSERT INTO observations(id,entity_id,provider_id,field,value_json,observed_at,expires_at,confidence)
+                           VALUES(?,?,?,?,?,?,?,?)""",
                         (str(uuid.uuid4()), entity_id, provider_id, field, json.dumps(value), now, expires, 1.0),
                     )
         return entity_id
@@ -178,7 +198,8 @@ class ProviderManager:
                 if not existing:
                     with self.database.transaction() as connection:
                         connection.execute(
-                            "INSERT INTO conflicts VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            """INSERT INTO conflicts(id,entity_id,provider_id,field,manual_value,observed_value,status,created_at,resolved_at,resolution)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)""",
                             (str(uuid.uuid4()), entity["id"], provider_id, field, str(manual), str(observed), "open", utcnow(), None, None),
                         )
 
@@ -220,11 +241,9 @@ class ProviderManager:
 
         count = 0
         for item in found.values():
-            try:
-                hostname = socket.gethostbyaddr(item["ip"])[0]
-            except (socket.herror, socket.gaierror, TimeoutError):
-                hostname = None
-            self._store_record(
+            hostname = await asyncio.to_thread(reverse_hostname, item["ip"])
+            await asyncio.to_thread(
+                self._store_record,
                 provider["id"],
                 item["ip"],
                 "network_device",
@@ -257,7 +276,8 @@ class ProviderManager:
                 monitor_id = str(monitor.get("id"))
                 latest = (heartbeats.get(monitor_id) or [{}])[-1]
                 state = {1: "up", 0: "down", 2: "degraded"}.get(latest.get("status"), "unknown")
-                self._store_record(
+                await asyncio.to_thread(
+                    self._store_record,
                     provider["id"], monitor_id, "service", {"monitor": monitor, "heartbeat": latest},
                     name=monitor.get("name") or f"Monitor {monitor_id}", entity_type="service", status=state,
                 )
@@ -289,7 +309,8 @@ class ProviderManager:
                 host_name = system.get("hostname") or endpoint.get("name") or base_url
                 quicklook = responses[3].json() if not isinstance(responses[3], Exception) and responses[3].status_code == 200 else {}
                 memory = responses[4].json() if not isinstance(responses[4], Exception) and responses[4].status_code == 200 else {}
-                host_id = self._store_record(
+                host_id = await asyncio.to_thread(
+                    self._store_record,
                     provider["id"], f"host:{host_name}", "host",
                     {"system": system, "ip": ip_data, "quicklook": quicklook, "memory": memory},
                     name=host_name, entity_type="host", status="up", ip_address=ip_data.get("address"), hostname=host_name,
@@ -297,7 +318,8 @@ class ProviderManager:
                 count += 1
                 if not isinstance(responses[2], Exception) and responses[2].status_code == 200:
                     for container in responses[2].json():
-                        self._store_record(
+                        await asyncio.to_thread(
+                            self._store_record,
                             provider["id"], f"container:{host_name}:{container.get('id') or container.get('name')}",
                             "container", container, name=container.get("name") or "container", entity_type="container",
                             status="up" if str(container.get("status", "")).lower().startswith("up") else "down",
@@ -324,10 +346,13 @@ class ProviderManager:
                 for item in clients:
                     identifiers = item.get("ids") or item.get("ip_addrs") or [item.get("ip")]
                     identifiers = [value for value in identifiers if value]
-                    ip_address = next((value for value in identifiers if "." in value or ":" in value and not normalize_mac(value)), None)
+                    # AdGuard-identifiers kunnen MAC's, IP's, CIDR's en client-ID's
+                    # door elkaar bevatten; alleen echte IP-literals tellen als adres.
                     mac_address = next((value for value in identifiers if normalize_mac(value)), None)
+                    ip_address = next((value for value in identifiers if is_ip_literal(value)), None)
                     external_id = mac_address or ip_address or item.get("name")
-                    self._store_record(
+                    await asyncio.to_thread(
+                        self._store_record,
                         provider["id"], f"client:{external_id}", "dns_client", item,
                         name=item.get("name") or str(external_id), entity_type="device", status="unknown",
                         ip_address=ip_address, mac_address=mac_address, hostname=item.get("name"),
@@ -337,7 +362,7 @@ class ProviderManager:
                 response = await client.get(f"{base_url}/control/rewrite/list")
                 response.raise_for_status()
                 for item in response.json():
-                    self._upsert_dns_record(provider["id"], item)
+                    await asyncio.to_thread(self._upsert_dns_record, provider["id"], item)
                     count += 1
         return count
 
@@ -395,16 +420,18 @@ class ProviderManager:
         for host in response.json():
             service_name = (host.get("domain_names") or [f"proxy-{host.get('id')}"])[0]
             target = str(host.get("forward_host", ""))
-            target_entity = self.database.fetch_one(
+            target_entity = await asyncio.to_thread(
+                self.database.fetch_one,
                 "SELECT id FROM entities WHERE ip_address=? OR lower(hostname)=lower(?) OR lower(name)=lower(?) LIMIT 1",
                 (target, target, target),
             )
-            service_entity_id = self._store_record(
+            service_entity_id = await asyncio.to_thread(
+                self._store_record,
                 provider["id"], f"proxy:{host.get('id')}", "proxy_host", host,
                 name=service_name, entity_type="service", status="up" if host.get("enabled", 1) else "down",
                 parent_id=target_entity["id"] if target_entity else None,
             )
-            self._upsert_proxy_host(provider["id"], host, target_entity, service_entity_id)
+            await asyncio.to_thread(self._upsert_proxy_host, provider["id"], host, target_entity, service_entity_id)
             count += 1
         return count
 
@@ -442,7 +469,8 @@ class ProviderManager:
             response.raise_for_status()
             for endpoint in response.json():
                 endpoint_id = str(endpoint["Id"])
-                host_id = self._store_record(
+                host_id = await asyncio.to_thread(
+                    self._store_record,
                     provider["id"], f"endpoint:{endpoint_id}", "docker_host", endpoint,
                     name=endpoint.get("Name") or f"Docker {endpoint_id}", entity_type="host", status="up",
                 )
@@ -452,7 +480,8 @@ class ProviderManager:
                 for container in containers.json():
                     names = container.get("Names") or []
                     name = (names[0].lstrip("/") if names else container.get("Id", "")[:12])
-                    self._store_record(
+                    await asyncio.to_thread(
+                        self._store_record,
                         provider["id"], f"container:{endpoint_id}:{container.get('Id')}", "container", container,
                         name=name, entity_type="container",
                         status="up" if container.get("State") == "running" else "down", parent_id=host_id,
@@ -478,7 +507,8 @@ class ProviderManager:
         for resource in resources:
             if resource.get("type") == "node":
                 node = resource.get("node") or resource.get("id")
-                nodes[node] = self._store_record(
+                nodes[node] = await asyncio.to_thread(
+                    self._store_record,
                     provider["id"], f"node:{node}", "proxmox_node", resource,
                     name=node, entity_type="host", status="up" if resource.get("status") == "online" else "down",
                 )
@@ -488,7 +518,8 @@ class ProviderManager:
             if kind not in {"qemu", "lxc"}:
                 continue
             node = resource.get("node")
-            self._store_record(
+            await asyncio.to_thread(
+                self._store_record,
                 provider["id"], f"{kind}:{node}:{resource.get('vmid')}", kind, resource,
                 name=resource.get("name") or f"{kind}-{resource.get('vmid')}",
                 entity_type="vm" if kind == "qemu" else "lxc",

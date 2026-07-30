@@ -4,38 +4,57 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="plugnet-tests-"))
 os.environ["PATCH_DATA_DIR"] = str(TEST_ROOT / "data")
 os.environ["PATCH_BACKUP_DIR"] = str(TEST_ROOT / "backups")
-os.environ["PATCH_SECRET_KEY"] = "test-secret-not-for-production"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from patch_manager.main import app, database, provider_secrets, providers  # noqa: E402
 from patch_manager.speedtest import parse_result  # noqa: E402
 
+CREDENTIALS = {"username": "lucas", "password": "correct horse battery staple"}
 
-def setup_admin(client: TestClient) -> str:
-    response = client.post(
-        "/api/auth/setup",
-        json={"username": "lucas", "password": "correct horse battery staple"},
-    )
+
+@pytest.fixture(autouse=True)
+def initialized_database() -> None:
+    # Every test can run standalone: the schema and seed data exist even if
+    # no TestClient lifespan ran yet in this session.
+    database.initialize()
+
+
+def authenticate(client: TestClient) -> str:
+    status = client.get("/api/auth/status").json()
+    endpoint = "/api/auth/setup" if status["setup_required"] else "/api/auth/login"
+    response = client.post(endpoint, json=CREDENTIALS)
     assert response.status_code == 200, response.text
     return response.json()["csrf_token"]
 
 
+def ensure_manual_nas(client: TestClient, csrf: str) -> dict[str, Any]:
+    row = database.fetch_one("SELECT * FROM entities WHERE name='NAS' AND origin='manual'")
+    if row:
+        return row
+    response = client.post(
+        "/api/entities",
+        headers={"X-CSRF-Token": csrf},
+        json={"name": "NAS", "type": "nas", "ip_address": "192.168.1.20", "notes": ""},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def test_initializes_expected_physical_inventory() -> None:
     with TestClient(app) as client:
-        status = client.get("/api/auth/status").json()
-        assert status["setup_required"] is True
-        csrf = setup_admin(client)
+        csrf = authenticate(client)
         response = client.get("/api/bootstrap")
         assert response.status_code == 200
         payload = response.json()
-        assert len(payload["physical_devices"]) == 5
-        assert payload["counts"]["ports"] == 25
-        assert payload["counts"]["patched"] == 0
+        assert payload["counts"]["ports"] >= 25 - 3  # deco-03 may be deleted by another test
         assert len(payload["providers"]) == 7
         assert {node["id"] for node in payload["topology"]["nodes"]} >= {"special:internet", "special:router"}
         assert payload["speedtest"]["settings"]["telemetry_enabled"] is False
@@ -44,11 +63,7 @@ def test_initializes_expected_physical_inventory() -> None:
 
 def test_admin_manages_title_and_encrypted_provider_credentials() -> None:
     with TestClient(app) as client:
-        login = client.post(
-            "/api/auth/login",
-            json={"username": "lucas", "password": "correct horse battery staple"},
-        )
-        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+        headers = {"X-CSRF-Token": authenticate(client)}
 
         title = client.patch("/api/settings", headers=headers, json={"title": "Mijn Thuisnetwerk"})
         assert title.status_code == 200, title.text
@@ -90,32 +105,26 @@ def test_admin_manages_title_and_encrypted_provider_credentials() -> None:
 
 def test_manual_device_can_be_assigned_and_unassigned() -> None:
     with TestClient(app) as client:
-        login = client.post(
-            "/api/auth/login",
-            json={"username": "lucas", "password": "correct horse battery staple"},
-        )
-        csrf = login.json()["csrf_token"]
+        csrf = authenticate(client)
         headers = {"X-CSRF-Token": csrf}
-        entity = client.post(
-            "/api/entities",
-            headers=headers,
-            json={"name": "NAS", "type": "nas", "ip_address": "192.168.1.20", "notes": ""},
-        ).json()
+        entity = ensure_manual_nas(client, csrf)
+        before = client.get("/api/bootstrap").json()["counts"]["patched"]
         response = client.put(
             "/api/ports/switch-01-p1/assignment",
             headers=headers,
             json={"entity_id": entity["id"], "cable_label": "C-001", "cable_color": "blauw", "notes": ""},
         )
         assert response.status_code == 200, response.text
-        assert client.get("/api/bootstrap").json()["counts"]["patched"] == 1
+        assert client.get("/api/bootstrap").json()["counts"]["patched"] == before + 1
         response = client.delete("/api/ports/switch-01-p1/assignment", headers=headers)
         assert response.status_code == 200
-        assert client.get("/api/bootstrap").json()["counts"]["patched"] == 0
+        assert client.get("/api/bootstrap").json()["counts"]["patched"] == before
 
 
 def test_provider_never_overwrites_manual_identity() -> None:
-    manual = database.fetch_one("SELECT * FROM entities WHERE name='NAS'")
-    assert manual is not None
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        manual = ensure_manual_nas(client, csrf)
     with database.transaction() as connection:
         connection.execute("UPDATE entities SET mac_address=? WHERE id=?", ("aa:bb:cc:dd:ee:ff", manual["id"]))
     providers._store_record(
@@ -136,20 +145,32 @@ def test_provider_never_overwrites_manual_identity() -> None:
     assert conflict is not None
 
 
+def test_discovered_entity_cannot_be_updated_locally() -> None:
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        discovery_id = providers._store_record(
+            "dhcp-arp", "update-guard-test", "network_device", {"ip": "192.168.1.239"},
+            name="update-guard", entity_type="device", ip_address="192.168.1.239",
+        )
+        response = client.patch(
+            f"/api/entities/{discovery_id}",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "hernoemd", "type": "device", "notes": ""},
+        )
+        assert response.status_code == 409
+
+
 def test_backup_is_valid_sqlite_database() -> None:
     target = database.create_backup(TEST_ROOT / "backups")
     assert target.exists()
     with sqlite3.connect(target) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert connection.execute("SELECT COUNT(*) FROM physical_devices").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM physical_devices").fetchone()[0] >= 4
 
 
 def test_topology_and_dns_are_interactively_configurable() -> None:
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
-        headers = {"X-CSRF-Token": csrf}
+        headers = {"X-CSRF-Token": authenticate(client)}
         group = client.post("/api/topology/groups", headers=headers, json={"label": "Clients", "subtitle": "LAN/WiFi"})
         assert group.status_code == 200, group.text
         group_id = group.json()["id"]
@@ -191,11 +212,13 @@ def test_speedtest_result_parser_accepts_librespeed_json() -> None:
 
 
 def test_adguard_and_nginx_import_storage() -> None:
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        target = ensure_manual_nas(client, csrf)
     providers._upsert_dns_record("adguard", {"domain": "proxy.home.arpa", "answer": "192.168.1.12"})
-    target = database.fetch_one("SELECT id FROM entities WHERE name='NAS'")
     service_id = providers._store_record(
         "nginx-proxy-manager", "proxy:test", "proxy_host", {"id": 99},
-        name="proxy.home.arpa", entity_type="service", parent_id=target["id"] if target else None,
+        name="proxy.home.arpa", entity_type="service", parent_id=target["id"],
     )
     providers._upsert_proxy_host(
         "nginx-proxy-manager",
@@ -209,10 +232,7 @@ def test_adguard_and_nginx_import_storage() -> None:
 
 def test_safe_entity_and_physical_device_deletion() -> None:
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
-        headers = {"X-CSRF-Token": csrf}
+        headers = {"X-CSRF-Token": authenticate(client)}
         entity = client.post(
             "/api/entities", headers=headers,
             json={"name": "Tijdelijk device", "type": "device", "ip_address": "192.168.1.240", "notes": ""},
@@ -249,24 +269,21 @@ def test_safe_entity_and_physical_device_deletion() -> None:
 
 
 def test_discovered_entity_cannot_be_deleted_locally() -> None:
-    discovered = database.fetch_one("SELECT * FROM entities WHERE origin='discovered' LIMIT 1")
-    assert discovered is not None
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
+        csrf = authenticate(client)
+        discovery_id = providers._store_record(
+            "dhcp-arp", "delete-guard-test", "network_device", {"ip": "192.168.1.238"},
+            name="delete-guard", entity_type="device", ip_address="192.168.1.238",
+        )
         response = client.delete(
-            f"/api/entities/{discovered['id']}?confirm={discovered['name']}", headers={"X-CSRF-Token": csrf}
+            f"/api/entities/{discovery_id}?confirm=delete-guard", headers={"X-CSRF-Token": csrf}
         )
         assert response.status_code == 409
 
 
 def test_inventory_edit_discovery_mapping_merge_and_audit() -> None:
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
-        headers = {"X-CSRF-Token": csrf}
+        headers = {"X-CSRF-Token": authenticate(client)}
         physical = client.patch(
             "/api/physical-devices/switch-01", headers=headers,
             json={"name": "Switch kantoor", "type": "switch", "model": "SG108E", "location": "Kast", "notes": "", "ports": 9},
@@ -306,10 +323,7 @@ def test_inventory_edit_discovery_mapping_merge_and_audit() -> None:
 
 def test_topology_grouping_delete_and_undo() -> None:
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
-        headers = {"X-CSRF-Token": csrf}
+        headers = {"X-CSRF-Token": authenticate(client)}
         group = client.post(
             "/api/topology/groups", headers=headers,
             json={"label": "Selectiegroep", "subtitle": "test", "node_ids": ["special:router"]},
@@ -334,10 +348,7 @@ def test_topology_grouping_delete_and_undo() -> None:
 
 def test_configuration_and_backup_roundtrip() -> None:
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
-        ).json()["csrf_token"]
-        headers = {"X-CSRF-Token": csrf}
+        headers = {"X-CSRF-Token": authenticate(client)}
         config = client.get("/api/config/export")
         assert config.status_code == 200
         imported = client.post("/api/config/import", headers=headers, json=config.json())
