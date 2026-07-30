@@ -1,0 +1,194 @@
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any
+
+from .db import Database, utcnow
+
+
+def sync_topology_catalog(database: Database) -> None:
+    """Project inventory into topology nodes without touching manual layout."""
+    now = utcnow()
+    with database.transaction() as connection:
+        devices = connection.execute("SELECT * FROM physical_devices ORDER BY position").fetchall()
+        for index, device in enumerate(devices):
+            node_id = f"physical:{device['id']}"
+            connection.execute(
+                """INSERT INTO topology_nodes
+                   (id,reference_type,reference_id,label,subtitle,node_type,x,y,width,height,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(reference_type,reference_id) DO UPDATE SET
+                   label=CASE WHEN topology_nodes.metadata_json='{}' THEN excluded.label ELSE topology_nodes.label END,
+                   subtitle=excluded.subtitle,node_type=excluded.node_type,updated_at=excluded.updated_at""",
+                (node_id, "physical", device["id"], device["name"], device["model"], device["type"],
+                 40 + index * 220, 230, 190, 64, now, now),
+            )
+
+        entities = connection.execute("SELECT * FROM entities WHERE ignored=0 AND archived=0").fetchall()
+        for index, entity in enumerate(entities):
+            node_id = f"entity:{entity['id']}"
+            parent_node_id = f"entity:{entity['parent_id']}" if entity["parent_id"] else None
+            connection.execute(
+                """INSERT INTO topology_nodes
+                   (id,reference_type,reference_id,label,subtitle,node_type,parent_node_id,parent_source,x,y,width,height,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(reference_type,reference_id) DO UPDATE SET
+                   label=CASE WHEN topology_nodes.metadata_json='{}' THEN excluded.label ELSE topology_nodes.label END,
+                   subtitle=excluded.subtitle,node_type=excluded.node_type,
+                   parent_node_id=CASE WHEN topology_nodes.parent_source='auto' THEN excluded.parent_node_id ELSE topology_nodes.parent_node_id END,
+                   updated_at=excluded.updated_at""",
+                (node_id, "entity", entity["id"], entity["name"],
+                 entity["ip_address"] or entity["hostname"] or entity["type"], entity["type"],
+                 parent_node_id, "auto", 40 + (index % 5) * 220, 390 + (index // 5) * 90, 180, 58, now, now),
+            )
+
+        # Patch relations are fully derived. They may disappear when a port is
+        # unassigned, but manual relations remain untouched.
+        connection.execute("DELETE FROM topology_relations WHERE source='patch'")
+        assignments = connection.execute(
+            """SELECT pa.port_id,pa.entity_id,p.physical_device_id,p.label
+               FROM port_assignments pa JOIN ports p ON p.id=pa.port_id"""
+        ).fetchall()
+        for assignment in assignments:
+            connection.execute(
+                """INSERT OR REPLACE INTO topology_relations
+                   (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'patch',1,?,?)""",
+                (f"patch:{assignment['port_id']}", f"physical:{assignment['physical_device_id']}",
+                 f"entity:{assignment['entity_id']}", "physical", assignment["label"], now, now),
+            )
+
+
+def topology_payload(database: Database) -> dict[str, Any]:
+    sync_topology_catalog(database)
+    nodes = database.fetch_all(
+        """SELECT n.*,e.status,e.ip_address,e.hostname,e.last_seen_at
+           FROM topology_nodes n LEFT JOIN entities e
+             ON n.reference_type='entity' AND e.id=n.reference_id
+           WHERE n.hidden=0 ORDER BY n.created_at"""
+    )
+    metrics = entity_metrics(database)
+    for node in nodes:
+        node["manual_position"] = bool(node["manual_position"])
+        node["collapsed"] = bool(node["collapsed"])
+        node["metadata"] = json.loads(node.pop("metadata_json") or "{}")
+        node["metrics"] = metrics.get(node["reference_id"], {}) if node["reference_type"] == "entity" else {}
+    relations = database.fetch_all("SELECT * FROM topology_relations ORDER BY source,created_at")
+    for relation in relations:
+        relation["locked"] = bool(relation["locked"])
+        relation["metadata"] = json.loads(relation.pop("metadata_json") or "{}")
+    return {"nodes": nodes, "relations": relations}
+
+
+def entity_metrics(database: Database) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    records = database.fetch_all(
+        """SELECT pr.entity_id,pr.raw_json,p.name AS provider_name,p.type AS provider_type
+           FROM provider_records pr JOIN providers p ON p.id=pr.provider_id
+           WHERE pr.entity_id IS NOT NULL ORDER BY pr.last_seen_at"""
+    )
+    for record in records:
+        entity_id = record["entity_id"]
+        raw = json.loads(record["raw_json"] or "{}")
+        metrics = result.setdefault(entity_id, {"sources": []})
+        if record["provider_name"] not in metrics["sources"]:
+            metrics["sources"].append(record["provider_name"])
+        if record["provider_type"] == "proxmox":
+            metrics.update(
+                cpu_percent=round(float(raw.get("cpu", 0)) * 100, 1) if raw.get("cpu") is not None else None,
+                memory_used=raw.get("mem"), memory_total=raw.get("maxmem"),
+                disk_used=raw.get("disk"), disk_total=raw.get("maxdisk"), uptime_seconds=raw.get("uptime"),
+            )
+        elif record["provider_type"] == "glances":
+            quick = raw.get("quicklook") or {}
+            memory = raw.get("memory") or {}
+            metrics.update(
+                cpu_percent=quick.get("cpu"), memory_used=memory.get("used"), memory_total=memory.get("total"),
+                uptime_seconds=(raw.get("system") or {}).get("uptime"),
+            )
+        elif record["provider_type"] == "uptime_kuma":
+            heartbeat = raw.get("heartbeat") or {}
+            metrics.update(latency_ms=heartbeat.get("ping"), message=heartbeat.get("msg"))
+    return result
+
+
+def create_group(database: Database, label: str, subtitle: str = "") -> dict[str, Any]:
+    node_id = f"group:{uuid.uuid4()}"
+    now = utcnow()
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO topology_nodes
+               (id,reference_type,reference_id,label,subtitle,node_type,x,y,width,height,manual_position,metadata_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,'group',80,460,420,220,1,'{}',?,?)""",
+            (node_id, "group", node_id.split(":", 1)[1], label, subtitle, now, now),
+        )
+    return database.fetch_one("SELECT * FROM topology_nodes WHERE id=?", (node_id,))
+
+
+def create_relation(database: Database, from_node_id: str, to_node_id: str, relation_type: str, label: str) -> dict[str, Any]:
+    if from_node_id == to_node_id:
+        raise ValueError("Een node kan niet met zichzelf worden verbonden")
+    relation_id = f"manual:{uuid.uuid4()}"
+    now = utcnow()
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO topology_relations
+               (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
+               VALUES(?,?,?,?,?,'manual',1,?,?)""",
+            (relation_id, from_node_id, to_node_id, relation_type, label, now, now),
+        )
+    return database.fetch_one("SELECT * FROM topology_relations WHERE id=?", (relation_id,))
+
+
+def capture_topology(database: Database, action: str, actor_user_id: str | None) -> None:
+    snapshot = {
+        "nodes": database.fetch_all("SELECT * FROM topology_nodes"),
+        "relations": database.fetch_all("SELECT * FROM topology_relations WHERE source='manual'"),
+    }
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO topology_history(id,action,snapshot_json,actor_user_id,created_at) VALUES(?,?,?,?,?)",
+            (str(uuid.uuid4()), action, json.dumps(snapshot), actor_user_id, utcnow()),
+        )
+        connection.execute(
+            """DELETE FROM topology_history WHERE id IN (
+                 SELECT id FROM topology_history ORDER BY rowid DESC LIMIT -1 OFFSET 50
+               )"""
+        )
+
+
+def undo_topology(database: Database) -> str | None:
+    history = database.fetch_one("SELECT * FROM topology_history ORDER BY rowid DESC LIMIT 1")
+    if not history:
+        return None
+    snapshot = json.loads(history["snapshot_json"])
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM topology_relations WHERE source='manual'")
+        connection.execute("DELETE FROM topology_nodes WHERE reference_type='group'")
+        for node in snapshot.get("nodes", []):
+            if node["reference_type"] == "group":
+                columns = [key for key in node if key != "parent_node_id"]
+                connection.execute(
+                    f"INSERT OR REPLACE INTO topology_nodes ({','.join(columns)},parent_node_id) VALUES ({','.join('?' for _ in columns)},NULL)",
+                    tuple(node[column] for column in columns),
+                )
+            else:
+                connection.execute(
+                    """UPDATE topology_nodes SET label=?,subtitle=?,parent_node_id=NULL,parent_source=?,lifecycle=?,
+                       x=?,y=?,width=?,height=?,manual_position=?,collapsed=?,hidden=?,metadata_json=?,updated_at=? WHERE id=?""",
+                    (node["label"], node["subtitle"], node["parent_source"], node["lifecycle"], node["x"], node["y"],
+                     node["width"], node["height"], node["manual_position"], node["collapsed"], node["hidden"],
+                     node["metadata_json"], utcnow(), node["id"]),
+                )
+        for node in snapshot.get("nodes", []):
+            if node.get("parent_node_id"):
+                connection.execute("UPDATE topology_nodes SET parent_node_id=? WHERE id=?", (node["parent_node_id"], node["id"]))
+        for relation in snapshot.get("relations", []):
+            columns = list(relation)
+            connection.execute(
+                f"INSERT OR IGNORE INTO topology_relations ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                tuple(relation[column] for column in columns),
+            )
+        connection.execute("DELETE FROM topology_history WHERE id=?", (history["id"],))
+    return history["action"]

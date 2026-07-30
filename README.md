@@ -1,1 +1,133 @@
-# network-patchmngr
+# Network Patch Manager
+
+Lokale webapp voor handmatige fysieke patchadministratie en een automatisch verrijkte homelabtopologie.
+
+De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hostnames en virtuele inventaris observeren, maar kunnen handmatige namen, poortkeuzes en kabelinformatie niet overschrijven. Afwijkingen worden als conflict opgeslagen.
+
+## Functies
+
+- **Patch** — vijf vooraf ingestelde fysieke apparaten, 25 vrije poorten, handmatige devices, één device per poort en optionele kabelgegevens.
+- **Veilig verwijderen** — handmatige devices en fysieke netwerkapparaten tonen eerst hun afhankelijkheden. Poortkoppelingen en topologierelaties worden opgeruimd; DNS/proxykoppelingen blijven als losgekoppelde records behouden.
+- **Inventarisbeheer** — handmatige devices en fysieke netwerkapparaten kunnen worden bewerkt; het poortaantal kan veilig groeien of krimpen zolang te verwijderen poorten vrij zijn.
+- **Topologie** — geneste hosts/VM's/containers/services, fysieke en virtuele relaties, status en live metrics. In bewerkmodus kun je nodes verslepen, groeperen, hernoemen, plannen en handmatige relaties tekenen.
+- **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
+- **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
+- **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.
+- **Discoverybeheer** — discoveries negeren, archiveren, herstellen of samenvoegen met een bestaand device; providerrecords kunnen ook expliciet worden gekoppeld en ontkoppeld.
+- **Uitwisseling & herstel** — SQLite-back-ups downloaden, importeren en terugzetten, plus configuratie exporteren/importeren als JSON. Voor restore/import wordt automatisch een veiligheidsback-up gemaakt.
+- **Audit & undo** — de laatste 200 beheeracties zijn zichtbaar; topologiewijzigingen hebben een server-side undo-geschiedenis van maximaal 50 stappen.
+- Eerste-run beheerder, scrypt-wachtwoordhashing, server-side sessies, HttpOnly-cookie en CSRF-controle.
+- SQLite in WAL-modus met auditlog en consistente online-back-ups.
+- Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager.
+
+## Starten met Docker Compose
+
+```bash
+cp .env.example .env
+```
+
+Start daarna de applicatie. De beveiligingssleutel wordt bij de eerste start automatisch in het blijvende datavolume gemaakt:
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://<docker-vm-ip>:8080`. De eerste bezoeker maakt het eenmalige beheeraccount aan. Daarna verdwijnt de setup-route automatisch. De container gebruikt host networking op de Linux Docker-VM, zodat DHCP/ARP-discovery de LAN-burentabel kan gebruiken; poort 8080 moet daarom vrij zijn op die VM.
+
+De zichtbare applicatietitel wijzig je onder **Admin → Applicatie**. Zo kan dezelfde openbare code onder een eigen naam worden gebruikt. Providergeheimen staan niet in de repository of configuratie-export. Bewaar bij een volledige migratie ook het Docker-volume `patch-data`; daarin staat naast de database de lokale sleutel waarmee providergegevens zijn versleuteld.
+
+### HTTPS
+
+Logingegevens zijn op onbeveiligd HTTP zichtbaar voor iemand die het LAN-verkeer kan onderscheppen. Plaats de app daarom bij voorkeur achter Caddy, Traefik of Nginx met een intern certificaat en zet vervolgens:
+
+```env
+PATCH_SESSION_SECURE=true
+```
+
+## Providers configureren
+
+Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de URL's en inloggegevens in en zet de provider daarna aan. Inloggegevens worden met een automatisch gemaakte sleutel versleuteld opgeslagen; de interface geeft alleen aan welke velden zijn ingesteld.
+
+| Provider | Inloggegevens in Admin | Opmerking |
+|---|---|---|
+| DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde `/24`-subnets; maximaal 1024 adressen per subnet |
+| Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints |
+| Glances | gebruikersnaam en wachtwoord | Ondersteunt meerdere API-v4-endpoints |
+| Portainer | API-key | Gebruik een aparte gebruiker met minimale environmentrechten |
+| Proxmox | API-tokengeheim | Gebruik een read-only API-token |
+| AdGuard Home | gebruikersnaam en wachtwoord | Importeert clients en DNS-rewrites via `/control/clients` en `/control/rewrite/list` |
+| Nginx Proxy Manager | API-token of gebruikersnaam en wachtwoord | Importeert proxyhosts; de adapter schrijft niets terug naar NPM |
+
+De meegeleverde configuratie bevat alvast de adressen uit het ontwerp voor Docker VM (`192.168.1.12`) en Proxmox (`192.168.1.100`). Controleer die voordat je providers inschakelt.
+
+Bij zelfondertekende certificaten kan `verify_tls` tijdelijk op `false`. Een eigen lokale CA en `true` is veiliger.
+
+AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de bron. Handmatige DNS-records kun je volledig in Plugnet beheren. NPM-doelen worden op IP, hostname of naam aan bestaande entities gekoppeld; de proxyhost verschijnt als geneste service in de topologie.
+
+## Topologie en relaties
+
+- Een fysieke poortkoppeling tekent automatisch een fysieke relatie.
+- Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.
+- Relaties die niet betrouwbaar zijn af te leiden — bijvoorbeeld de onderlinge bekabeling van Deco-units zonder SNMP — teken je zelf in **Topologie → Bewerken → Relatie**.
+- Handmatige posities, groepen en parents blijven behouden bij een volgende providersynchronisatie.
+- In bewerkmodus selecteer je meerdere nodes met shift-klik. De selectie kan samen worden versleept of direct in een nieuwe groep worden geplaatst.
+- Handmatige groepen zijn verwijderbaar; kinderen worden daarbij uit de groep gehaald. Met **Ongedaan** herstel je de laatste topologiewijziging.
+
+## Discoveries en bronkoppelingen
+
+- **Negeren** verbergt ruis uit de actieve discoverylijst en topologie, maar laat providersynchronisatie intact.
+- **Archiveren** bewaart een discovery als inactief historisch item.
+- **Herstellen** maakt een genegeerd of gearchiveerd item weer actief.
+- **Samenvoegen** verhuist providerrecords, observaties, DNS/proxykoppelingen en eventuele fysieke koppeling naar het gekozen doeldevice.
+- Onder **Expliciete bronkoppelingen** kan ieder afzonderlijk providerrecord handmatig aan een entity worden gekoppeld of losgemaakt.
+
+## Configuratie en herstel
+
+Configuratie-export bevat inventaris, poorten, providers zonder secrets, DNS, topologie en speedtestinstellingen. Import voegt records op stabiele ID samen en maakt eerst een back-up. Een volledige SQLite-restore vervangt de database; daarom wordt ook daar eerst een veiligheidskopie gemaakt en kan de huidige sessie daarna verlopen.
+
+## Speedtest
+
+De Docker-image bouwt `librespeed-cli` mee. Standaard wordt elke zes uur vanaf de Docker-VM getest; dit is dus de internetsnelheid gezien vanaf die VM. Via **Admin → Internetspeedtest** stel je interval, testduur, server en netwerkinterface in. Een test kan ook direct vanuit de topologie worden gestart.
+
+## Back-ups
+
+- Dagelijks op het uur uit `PATCH_BACKUP_SCHEDULE_HOUR` (standaard 03:00).
+- Consistente SQLite online-back-up, gevolgd door `PRAGMA integrity_check`.
+- Standaard 14 dagelijkse kopieën; instelbaar met `PATCH_BACKUP_RETENTION_DAILY`.
+- Bestanden staan in `./backups` op de Docker-host.
+- Een handmatige back-up kan vanuit Admin worden gestart.
+
+Neem `./backups` op in de normale Proxmox/VM-back-upstrategie. Back-ups worden nooit in het actieve databasevolume bewaard.
+
+## Lokaal ontwikkelen
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/uvicorn patch_manager.main:app --reload --port 8080
+```
+
+Tests:
+
+```bash
+.venv/bin/pytest -q
+```
+
+## Datamodel
+
+- `physical_devices`, `ports` en `port_assignments`: handmatige fysieke waarheid.
+- `entities`: handmatige en ontdekte hosts, devices, VM's, LXC's, containers en services.
+- `provider_records` en `observations`: tijdgebonden providerdata.
+- `conflicts`: afwijkingen tussen handmatige identiteit en observaties.
+- `topology_nodes` en `topology_relations`: persistente indeling, groepen en afgeleide/handmatige relaties.
+- `dns_records` en `proxy_hosts`: handmatige records en geïmporteerde AdGuard/NPM-data.
+- `speedtest_settings` en `speedtest_runs`: planning en lokale meetgeschiedenis.
+- `audit_log`: beheerwijzigingen.
+
+Containers en VM's worden niet samengevoegd met hun host. Ze blijven aparte entities met een `parent_id`, zodat de topologie een zuivere virtuele laag kan tekenen.
+
+Geïmporteerde entities worden niet lokaal verwijderd: verwijder of deactiveer ze in hun provider. Handmatig aangemaakte entities zijn verwijderbaar vanuit **Patch → Handmatige devices**. Ook de vooraf ingestelde switches en Deco-units zijn blijvend verwijderbaar en worden na een herstart niet opnieuw aangemaakt.
+
+## Bekende hardwarebeperking
+
+De TP-Link SG108E en Deco XE75 Pro hebben in deze app geen automatische poortprovider. Hun fysieke poorten en aansluitingen blijven handmatig. Algemene bereikbaarheid kan wel via DHCP/ARP of Uptime Kuma worden verrijkt.
