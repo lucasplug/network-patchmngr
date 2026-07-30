@@ -404,7 +404,8 @@ class Database:
     def audit(self, user_id: str | None, action: str, target_type: str, target_id: str | None, details: dict[str, Any] | None = None) -> None:
         with self.transaction() as connection:
             connection.execute(
-                "INSERT INTO audit_log VALUES(?,?,?,?,?,?,?)",
+                """INSERT INTO audit_log(id,actor_user_id,action,target_type,target_id,details_json,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
                 (str(uuid.uuid4()), user_id, action, target_type, target_id, json.dumps(details or {}), utcnow()),
             )
 

@@ -12,6 +12,14 @@ function applyBranding(settings = {}) {
   $$('[data-app-title]').forEach(element => { element.textContent = title; });
 }
 
+function errorMessage(body, status) {
+  const detail = body && typeof body === "object" ? body.detail : body;
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) return detail.map(item => (item && item.msg) || JSON.stringify(item)).join(" · ");
+  if (detail) return JSON.stringify(detail);
+  return `HTTP ${status}`;
+}
+
 async function api(path, options = {}) {
   const headers = {"Content-Type":"application/json", ...(options.headers || {})};
   if (state.csrf && options.method && !["GET", "HEAD"].includes(options.method)) headers["X-CSRF-Token"] = state.csrf;
@@ -20,7 +28,7 @@ async function api(path, options = {}) {
   const body = contentType.includes("json") ? await response.json() : await response.text();
   if (!response.ok) {
     if (response.status === 401 && !path.includes("/auth/")) showAuth(false);
-    throw new Error(body.detail || body || `HTTP ${response.status}`);
+    throw new Error(errorMessage(body, response.status));
   }
   return body;
 }
@@ -540,7 +548,7 @@ $("#config-export").addEventListener("click",async()=>{try{const config=await ap
 $("#config-import-button").addEventListener("click",()=>$("#config-import-file").click());
 $("#config-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());if(!confirm(`${file.name} samenvoegen met de huidige configuratie? Eerst wordt automatisch een back-up gemaakt.`))return;const result=await api("/api/config/import",{method:"POST",body:JSON.stringify(payload)});await loadData(true);toast(`${result.records} configuratierecords geïmporteerd`);}catch(error){toast(error instanceof SyntaxError?"Ongeldig JSON-bestand":error.message,"error");}finally{event.target.value="";}});
 $("#backup-import-button").addEventListener("click",()=>$("#backup-import-file").click());
-$("#backup-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;const data=new FormData();data.append("file",file);try{const response=await fetch("/api/backups/import",{method:"POST",headers:{"X-CSRF-Token":state.csrf},body:data});const body=await response.json();if(!response.ok)throw new Error(body.detail||"Import mislukt");await loadData(true);toast(`Back-up ${body.name} geïmporteerd`);}catch(error){toast(error.message,"error");}finally{event.target.value="";}});
+$("#backup-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;const data=new FormData();data.append("file",file);try{const response=await fetch("/api/backups/import",{method:"POST",headers:{"X-CSRF-Token":state.csrf},body:data});const body=await response.json();if(!response.ok)throw new Error(errorMessage(body,response.status));await loadData(true);toast(`Back-up ${body.name} geïmporteerd`);}catch(error){toast(error.message,"error");}finally{event.target.value="";}});
 
 $("#speed-indicator").addEventListener("click",()=>{switchTab("topology");setTimeout(()=>$("#speed-history-card").scrollIntoView({behavior:"smooth",block:"center"}),50);});
 $("#run-speedtest").addEventListener("click",async event=>{event.currentTarget.disabled=true;event.currentTarget.textContent="Test loopt…";try{const result=await api("/api/speedtest/run",{method:"POST"});await loadData(true);toast(result.status==="success"?"Speedtest voltooid":result.error||"Speedtest is al bezig",result.status==="failed"?"error":"success");}catch(error){toast(error.message,"error");}finally{event.currentTarget.disabled=false;event.currentTarget.textContent="Nu testen";}});

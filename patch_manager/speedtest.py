@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
+from contextlib import suppress
 from typing import Any
 
 from .db import Database, utcnow
+
+
+logger = logging.getLogger(__name__)
 
 
 class SpeedtestManager:
@@ -36,7 +41,7 @@ class SpeedtestManager:
         if self.lock.locked():
             return {"status": "busy"}
         async with self.lock:
-            settings = self.database.fetch_one("SELECT * FROM speedtest_settings WHERE id=1")
+            settings = self.database.fetch_one("SELECT * FROM speedtest_settings WHERE id=1") or {}
             run_id = str(uuid.uuid4())
             started = utcnow()
             with self.database.transaction() as connection:
@@ -86,6 +91,11 @@ class SpeedtestManager:
                     connection.execute("UPDATE speedtest_settings SET last_error=NULL,updated_at=? WHERE id=1", (completed,))
                 return {"status": "success", "id": run_id, **parsed}
             except (TimeoutError, asyncio.TimeoutError):
+                # wait_for annuleert alleen het wachten; het CLI-proces zelf
+                # moet expliciet worden gestopt om lekken te voorkomen.
+                with suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
                 return self._fail(run_id, "Speedtest heeft de tijdslimiet overschreden")
             except (json.JSONDecodeError, KeyError, ValueError) as exc:
                 return self._fail(run_id, f"Onverwacht LibreSpeed-resultaat: {exc}")
@@ -94,6 +104,7 @@ class SpeedtestManager:
 
     def _fail(self, run_id: str, message: str) -> dict[str, Any]:
         message = message[:1000]
+        logger.warning("Speedtest %s mislukt: %s", run_id, message)
         completed = utcnow()
         with self.database.transaction() as connection:
             connection.execute(

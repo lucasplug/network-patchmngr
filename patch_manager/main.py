@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -16,14 +18,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .db import Database, expires_in, utcnow
 from .providers import ProviderManager
 from .secret_store import SecretStore
 from .security import hash_password, new_token, token_digest, verify_password
 from .settings import get_settings
 from .speedtest import SpeedtestManager
-from .topology import capture_topology, create_group, create_relation, sync_topology_catalog, topology_payload, undo_topology
+from .topology import capture_topology, create_group, create_relation, topology_payload, undo_topology
 
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 database = Database(settings.database_path)
@@ -33,6 +39,14 @@ speedtests = SpeedtestManager(database)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SESSION_COOKIE = "plugnet_session"
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+LOGIN_WINDOW_SECONDS = 300
+BACKUP_IMPORT_MAX_BYTES = 512 * 1024 * 1024
+# Vaste hash zodat een login voor een onbekende gebruikersnaam evenveel tijd
+# kost als voor een bestaande (geen username-enumeratie via timing).
+DUMMY_PASSWORD_HASH = hash_password("timing-equalizer-not-a-real-password")
+# Referenties naar fire-and-forget taken; zonder referentie mag asyncio een
+# lopende taak garbage-collecten.
+BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 @dataclass
@@ -208,7 +222,7 @@ def create_session(user_id: str) -> tuple[str, str]:
     csrf = new_token()
     with database.transaction() as connection:
         connection.execute(
-            "INSERT INTO sessions VALUES(?,?,?,?,?)",
+            "INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,created_at) VALUES(?,?,?,?,?)",
             (token_digest(token), user_id, csrf, expires_in(), utcnow()),
         )
     return token, csrf
@@ -231,9 +245,37 @@ def write_auth(
     auth: AuthContext = Depends(current_auth),
     x_csrf_token: str | None = Header(default=None),
 ) -> AuthContext:
-    if not x_csrf_token or x_csrf_token != auth.csrf_token:
+    if not x_csrf_token or not hmac.compare_digest(x_csrf_token, auth.csrf_token):
         raise HTTPException(403, "Ongeldig CSRF-token")
     return auth
+
+
+def _prune_login_attempts() -> None:
+    cutoff = time.monotonic() - LOGIN_WINDOW_SECONDS
+    for key in list(LOGIN_ATTEMPTS):
+        recent = [stamp for stamp in LOGIN_ATTEMPTS[key] if stamp >= cutoff]
+        if recent:
+            LOGIN_ATTEMPTS[key] = recent
+        else:
+            del LOGIN_ATTEMPTS[key]
+
+
+def _maintenance_housekeeping() -> list[dict[str, Any]]:
+    """Blocking database housekeeping, uitgevoerd buiten de event loop."""
+    database.clean_sessions()
+    _prune_login_attempts()
+    with database.transaction() as connection:
+        connection.execute(
+            """UPDATE entities SET status='unknown',status_updated_at=?
+               WHERE status!='unknown' AND NOT EXISTS (
+                 SELECT 1 FROM observations o
+                 WHERE o.entity_id=entities.id AND o.field='status' AND o.expires_at>?
+               )""",
+            (utcnow(), utcnow()),
+        )
+    return database.fetch_all(
+        """SELECT id,poll_interval_seconds,last_run_at FROM providers WHERE enabled=1"""
+    )
 
 
 async def maintenance_loop() -> None:
@@ -241,35 +283,27 @@ async def maintenance_loop() -> None:
     while True:
         now = datetime.now()
         try:
-            database.clean_sessions()
-            with database.transaction() as connection:
-                connection.execute(
-                    """UPDATE entities SET status='unknown',status_updated_at=?
-                       WHERE status!='unknown' AND NOT EXISTS (
-                         SELECT 1 FROM observations o
-                         WHERE o.entity_id=entities.id AND o.field='status' AND o.expires_at>?
-                       )""",
-                    (utcnow(), utcnow()),
-                )
-            due = database.fetch_all(
-                """SELECT id,poll_interval_seconds,last_run_at FROM providers WHERE enabled=1"""
-            )
+            due = await asyncio.to_thread(_maintenance_housekeeping)
             for provider in due:
                 last = datetime.fromisoformat(provider["last_run_at"]) if provider["last_run_at"] else None
                 if not last or (datetime.now(UTC) - last).total_seconds() >= provider["poll_interval_seconds"]:
                     with suppress(Exception):
                         await providers.sync_one(provider["id"])
-            speedtest_settings = database.fetch_one("SELECT * FROM speedtest_settings WHERE id=1")
+            speedtest_settings = await asyncio.to_thread(
+                database.fetch_one, "SELECT * FROM speedtest_settings WHERE id=1"
+            )
             if speedtest_settings and speedtest_settings["enabled"]:
                 last_speedtest = datetime.fromisoformat(speedtest_settings["last_run_at"]) if speedtest_settings["last_run_at"] else None
                 if not last_speedtest or (datetime.now(UTC) - last_speedtest).total_seconds() >= speedtest_settings["interval_seconds"]:
-                    asyncio.create_task(speedtests.run())
+                    task = asyncio.create_task(speedtests.run())
+                    BACKGROUND_TASKS.add(task)
+                    task.add_done_callback(BACKGROUND_TASKS.discard)
             if now.hour == settings.backup_schedule_hour and last_backup_date != now.date():
-                database.create_backup(settings.backup_dir)
-                database.prune_backups(settings.backup_dir, settings.backup_retention_daily)
+                await asyncio.to_thread(database.create_backup, settings.backup_dir)
+                await asyncio.to_thread(database.prune_backups, settings.backup_dir, settings.backup_retention_daily)
                 last_backup_date = now.date()
         except Exception:
-            pass
+            logger.exception("Onderhoudslus is mislukt; nieuwe poging over 30 seconden")
         await asyncio.sleep(30)
 
 
@@ -283,13 +317,13 @@ async def lifespan(_: FastAPI):
         await task
 
 
-app = FastAPI(title="Network Patch Manager", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Network Patch Manager", version=__version__, lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": __version__}
 
 
 @app.get("/")
@@ -328,7 +362,7 @@ def setup(payload: Credentials, response: Response) -> dict[str, Any]:
             if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
                 raise HTTPException(409, "De eerste beheerder bestaat al")
             connection.execute(
-                "INSERT INTO users VALUES(?,?,?,?)",
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
                 (user_id, payload.username.strip(), password_hash, utcnow()),
             )
     except sqlite3.IntegrityError as exc:
@@ -342,13 +376,14 @@ def setup(payload: Credentials, response: Response) -> dict[str, Any]:
 @app.post("/api/auth/login")
 def login(payload: Credentials, request: Request, response: Response) -> dict[str, Any]:
     client_key = request.client.host if request.client else "unknown"
-    cutoff = time.monotonic() - 300
+    cutoff = time.monotonic() - LOGIN_WINDOW_SECONDS
     attempts = [timestamp for timestamp in LOGIN_ATTEMPTS.get(client_key, []) if timestamp >= cutoff]
     LOGIN_ATTEMPTS[client_key] = attempts
     if len(attempts) >= 5:
         raise HTTPException(429, "Te veel inlogpogingen; probeer het over vijf minuten opnieuw")
     user = database.fetch_one("SELECT * FROM users WHERE username=? COLLATE NOCASE", (payload.username.strip(),))
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    password_hash = user["password_hash"] if user else DUMMY_PASSWORD_HASH
+    if not verify_password(payload.password, password_hash) or not user:
         attempts.append(time.monotonic())
         raise HTTPException(401, "Onjuiste gebruikersnaam of wachtwoord")
     LOGIN_ATTEMPTS.pop(client_key, None)
@@ -395,7 +430,6 @@ def nested_physical_devices() -> list[dict[str, Any]]:
 
 @app.get("/api/bootstrap")
 def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
-    sync_topology_catalog(database)
     entities = database.fetch_all("SELECT * FROM entities ORDER BY origin,name")
     provider_rows = [serialize_provider(row) for row in database.fetch_all("SELECT * FROM providers ORDER BY name")]
     conflicts = database.fetch_all(
@@ -465,8 +499,12 @@ def create_entity(payload: EntityInput, auth: AuthContext = Depends(write_auth))
 
 @app.patch("/api/entities/{entity_id}")
 def update_entity(entity_id: str, payload: EntityInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
-    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+    entity = database.fetch_one("SELECT origin FROM entities WHERE id=?", (entity_id,))
+    if not entity:
         raise HTTPException(404, "Device niet gevonden")
+    if entity["origin"] != "manual":
+        # De volgende providersync zou een lokale bewerking stil overschrijven.
+        raise HTTPException(409, "Een geïmporteerd device bewerk je in de databron of via samenvoegen")
     with database.transaction() as connection:
         connection.execute(
             """UPDATE entities SET name=?,type=?,ip_address=?,mac_address=?,hostname=?,notes=?,updated_at=?
@@ -595,7 +633,8 @@ def create_physical_device(payload: PhysicalDeviceInput, auth: AuthContext = Dep
     position = database.fetch_one("SELECT COALESCE(MAX(position),-1)+1 AS n FROM physical_devices")["n"]
     with database.transaction() as connection:
         connection.execute(
-            "INSERT INTO physical_devices VALUES(?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO physical_devices(id,name,type,model,location,notes,position,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
             (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, position, now, now),
         )
         for number in range(1, payload.ports + 1):
@@ -693,7 +732,8 @@ def assign_port(port_id: str, payload: PortAssignmentInput, auth: AuthContext = 
         raise HTTPException(409, "Dit device is al aan een andere poort gekoppeld")
     with database.transaction() as connection:
         connection.execute(
-            """INSERT INTO port_assignments VALUES(?,?,?,?,?,?,?)
+            """INSERT INTO port_assignments(port_id,entity_id,cable_label,cable_color,notes,updated_at,updated_by)
+               VALUES(?,?,?,?,?,?,?)
                ON CONFLICT(port_id) DO UPDATE SET entity_id=excluded.entity_id,cable_label=excluded.cable_label,
                cable_color=excluded.cable_color,notes=excluded.notes,updated_at=excluded.updated_at,updated_by=excluded.updated_by""",
             (port_id, payload.entity_id, payload.cable_label, payload.cable_color, payload.notes, utcnow(), auth.user_id),
@@ -813,12 +853,21 @@ def backup_download(name: str, _: AuthContext = Depends(current_auth)) -> FileRe
 
 @app.post("/api/backups/import")
 async def backup_import(file: UploadFile = File(...), auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
-    payload = await file.read()
-    if len(payload) > 512 * 1024 * 1024:
-        raise HTTPException(413, "Back-up is groter dan 512 MB")
     settings.backup_dir.mkdir(parents=True, exist_ok=True)
     path = settings.backup_dir / f"patch-manager-imported-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}.db"
-    path.write_bytes(payload)
+    # Stream in blokken naar schijf zodat een te grote upload nooit eerst
+    # volledig in het geheugen belandt.
+    size = 0
+    try:
+        with path.open("wb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > BACKUP_IMPORT_MAX_BYTES:
+                    raise HTTPException(413, "Back-up is groter dan 512 MB")
+                handle.write(chunk)
+    except HTTPException:
+        path.unlink(missing_ok=True)
+        raise
     try:
         with sqlite3.connect(path) as connection:
             if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -829,8 +878,8 @@ async def backup_import(file: UploadFile = File(...), auth: AuthContext = Depend
     except (sqlite3.Error, ValueError) as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(422, f"Ongeldige Patch Manager-back-up: {exc}") from exc
-    database.audit(auth.user_id, "backup.import", "backup", path.name, {"original_name": file.filename, "size": len(payload)})
-    return {"name": path.name, "size": len(payload)}
+    database.audit(auth.user_id, "backup.import", "backup", path.name, {"original_name": file.filename, "size": size})
+    return {"name": path.name, "size": size}
 
 
 @app.post("/api/backups/{name}/restore")

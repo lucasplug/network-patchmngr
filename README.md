@@ -44,6 +44,12 @@ Logingegevens zijn op onbeveiligd HTTP zichtbaar voor iemand die het LAN-verkeer
 PATCH_SESSION_SECURE=true
 ```
 
+## Beveiligingsnotities
+
+- **Achter een reverse proxy**: de login-rate-limiting werkt per client-IP. Uvicorn vertrouwt `X-Forwarded-For` standaard alleen vanaf `127.0.0.1`. Draait de proxy op een andere host, geef dan `--forwarded-allow-ips` met het proxy-IP mee aan uvicorn; anders delen alle gebruikers achter de proxy één limiet.
+- **Netwerktoegang beperken**: de app doet zelf geen IP-filtering. Beperk toegang via de firewall van de Docker-VM of via de reverse proxy.
+- **Container draait als root met host networking**: dit is nodig voor de ARP-tabel en ICMP-discovery op het LAN. Draai de container daarom alleen op een dedicated, vertrouwde Docker-VM.
+
 ## Providers configureren
 
 Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de URL's en inloggegevens in en zet de provider daarna aan. Inloggegevens worden met een automatisch gemaakte sleutel versleuteld opgeslagen; de interface geeft alleen aan welke velden zijn ingesteld.
