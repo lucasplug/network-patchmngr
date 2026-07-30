@@ -1,0 +1,20 @@
+services:
+  patch-manager:
+    build: .
+    container_name: patch-manager
+    restart: unless-stopped
+    # Host networking lets DHCP/ARP discovery see the Docker VM's LAN table.
+    # This deployment target is a dedicated Linux Docker VM in Proxmox.
+    network_mode: host
+    environment:
+      TZ: "${TZ:-Europe/Amsterdam}"
+      PATCH_SESSION_SECURE: "${PATCH_SESSION_SECURE:-false}"
+      PATCH_TRUSTED_SUBNETS: "${PATCH_TRUSTED_SUBNETS:-192.168.1.0/24,127.0.0.0/8}"
+      PATCH_BACKUP_SCHEDULE_HOUR: "${PATCH_BACKUP_SCHEDULE_HOUR:-3}"
+      PATCH_BACKUP_RETENTION_DAILY: "${PATCH_BACKUP_RETENTION_DAILY:-14}"
+    volumes:
+      - patch-data:/data
+      - ./backups:/backups
+
+volumes:
+  patch-data:

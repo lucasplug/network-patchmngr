@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Network Patch Manager</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="ambient"></div>
+
+  <main id="auth-view" class="auth-view hidden">
+    <section class="auth-card glass">
+      <div class="brand large" data-app-title>Network Patch Manager</div>
+      <p class="eyebrow" id="auth-eyebrow">Lokale netwerkadministratie</p>
+      <h1 id="auth-title">Inloggen</h1>
+      <p class="muted" id="auth-copy">Alleen beheerders hebben toegang tot patch- en providergegevens.</p>
+      <form id="auth-form" class="stack">
+        <label>Gebruikersnaam<input name="username" autocomplete="username" required minlength="2"></label>
+        <label>Wachtwoord<input name="password" type="password" autocomplete="current-password" required minlength="12"></label>
+        <button class="button primary" type="submit"><span id="auth-submit-label">Inloggen</span><span aria-hidden="true">→</span></button>
+        <p id="auth-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+  </main>
+
+  <div id="app-shell" class="app-shell hidden">
+    <header class="topbar">
+      <div>
+        <div class="brand" data-app-title>Network Patch Manager</div>
+        <div class="top-subtitle">HomeLab · fysieke waarheid & live observaties</div>
+      </div>
+      <div class="top-actions">
+        <button class="speed-indicator" id="speed-indicator" title="Internetsnelheid en historie">
+          <span class="speed-value">↓ <b id="speed-down">—</b></span>
+          <span class="speed-value">↑ <b id="speed-up">—</b></span>
+          <span class="speed-ping" id="speed-ping">— ms</span>
+          <span class="speed-age" id="speed-age">nog niet gemeten</span>
+        </button>
+        <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
+        <button class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
+        <button class="profile-button" id="logout-button"><span class="avatar" id="avatar">A</span><span id="username">admin</span></button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Hoofdnavigatie">
+      <button class="tab active" data-tab="patch"><span class="tab-icon">⌁</span>Patch</button>
+      <button class="tab" data-tab="topology"><span class="tab-icon">◇</span>Topologie</button>
+      <button class="tab" data-tab="admin"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
+    </nav>
+
+    <section id="patch-view" class="view active">
+      <div class="view-heading">
+        <div><p class="eyebrow">Handmatig · bron van waarheid</p><h1>Fysieke aansluitingen</h1><p class="muted">Automatische bronnen tonen status, maar wijzigen nooit jouw poortkeuzes.</p></div>
+        <div class="heading-actions"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
+      </div>
+      <div id="summary-chips" class="chips"></div>
+      <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
+      <div id="physical-grid" class="physical-grid"></div>
+      <div class="section-bar with-space"><span>Handmatige devices</span><span class="muted" id="manual-entity-count"></span></div>
+      <div id="manual-entities-list" class="data-list"></div>
+    </section>
+
+    <section id="topology-view" class="view">
+      <div class="view-heading compact">
+        <div><p class="eyebrow">Live verrijking</p><h1>Netwerktopologie</h1><p class="muted">Fysieke patching vormt de basis; virtuele relaties worden als aparte laag getoond.</p></div>
+        <div class="topology-actions"><div class="layer-controls" role="group" aria-label="Topologielagen">
+          <label><input type="checkbox" data-layer="physical" checked> fysiek</label>
+          <label><input type="checkbox" data-layer="virtual" checked> virtueel</label>
+          <label><input type="checkbox" data-layer="services" checked> services</label>
+        </div><button class="button" id="topology-edit">Bewerken</button></div>
+      </div>
+      <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button class="button hidden" id="group-selection">Selectie groeperen</button><button class="button" id="topology-undo">↶ Ongedaan</button><button class="button" id="add-group">+ Groep</button><button class="button" id="add-relation">+ Relatie</button><button class="button" id="reset-layout">Auto-indeling</button><button class="button primary" id="finish-edit">Klaar</button></div></div>
+      <div class="topology-card glass">
+        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><span class="muted">sleepvrij · automatisch ingedeeld</span></div>
+        <div class="topology-scroll"><svg id="topology-canvas" viewBox="0 0 1200 760" role="img" aria-label="Netwerktopologie"></svg></div>
+      </div>
+      <div class="speed-history-card glass" id="speed-history-card">
+        <div class="speed-history-head"><div><p class="eyebrow">Internetverbinding</p><h2>Speedtesthistorie</h2></div><button class="button primary" id="run-speedtest">Nu testen</button></div>
+        <div class="speed-kpis"><div><span>Download</span><b id="speed-detail-down">—</b><small>Mbps</small></div><div><span>Upload</span><b id="speed-detail-up">—</b><small>Mbps</small></div><div><span>Ping</span><b id="speed-detail-ping">—</b><small>ms</small></div><div><span>Jitter</span><b id="speed-detail-jitter">—</b><small>ms</small></div></div>
+        <div class="speed-chart" id="speed-chart"></div>
+      </div>
+    </section>
+
+    <section id="admin-view" class="view">
+      <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".db,application/vnd.sqlite3"></div></div>
+      <div class="admin-grid">
+        <section class="admin-main">
+          <div class="section-bar"><span>Databronnen</span><span class="muted">read-only adapters</span></div>
+          <div id="providers-grid" class="providers-grid"></div>
+          <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
+          <div id="discoveries-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Genegeerd & gearchiveerd</span><span class="muted" id="inactive-discovery-count"></span></div>
+          <div id="inactive-discoveries-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Expliciete bronkoppelingen</span><span class="muted" id="mapping-count"></span></div>
+          <div id="provider-mappings-list" class="data-list compact-list"></div>
+          <div class="section-bar with-space"><span>DNS-records</span><button class="button micro" id="new-dns-record">+ Handmatig record</button></div>
+          <div id="dns-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Reverse proxyhosts</span><span class="muted" id="proxy-count"></span></div>
+          <div id="proxy-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Auditlog</span><span class="muted">laatste 200 acties</span></div>
+          <div id="audit-list" class="data-list compact-list"></div>
+        </section>
+        <aside class="admin-side">
+          <div class="side-card glass"><div class="side-title">Applicatie</div><form id="app-settings-form" class="stack compact-form"><label>Titel<input name="title" required minlength="2" maxlength="80"></label><button class="button full" type="submit">Titel opslaan</button></form><p class="muted tiny">De titel verschijnt in de kop, op het inlogscherm en in het browsertabblad.</p></div>
+          <div class="side-card glass"><div class="side-title">Conflicten <span id="conflict-count" class="badge">0</span></div><div id="conflicts-list" class="mini-list"></div></div>
+          <div class="side-card glass"><div class="side-title">Automatische back-ups</div><div id="backups-list" class="mini-list"></div><button class="button full" id="backup-import-button">Back-up importeren</button><p class="muted tiny">Download of herstel een consistente SQLite-kopie. Vóór herstel wordt automatisch een veiligheidsback-up gemaakt.</p></div>
+          <div class="side-card glass"><div class="side-title">Matchingbeleid</div><ol class="policy-list"><li>Expliciete mapping</li><li>MAC-adres</li><li>Provider-native ID</li><li>Hostname/IP als voorstel</li></ol><span class="safety-note">Handmatig wint altijd</span></div>
+          <div class="side-card glass"><div class="side-title">Internetspeedtest</div><div id="speed-settings-summary" class="mini-list"></div><button class="button full" id="speed-settings-button">Instellingen</button></div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <div id="drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="port-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head"><div><p class="eyebrow">Fysieke poort</p><h2 id="drawer-title">Poort</h2></div><button class="icon-button drawer-close" aria-label="Sluiten">×</button></div>
+    <form id="port-form" class="stack">
+      <input type="hidden" name="port_id">
+      <div class="port-identity"><span id="drawer-device"></span><span id="drawer-speed" class="pill"></span></div>
+      <label>Gekoppeld device<select name="entity_id"><option value="">Niet aangesloten</option></select></label>
+      <div class="field-row"><label>Kabellabel<input name="cable_label" placeholder="bijv. C-014"></label><label>Kleur<input name="cable_color" placeholder="bijv. blauw"></label></div>
+      <label>Notities<textarea name="notes" rows="4" placeholder="Wandcontactdoos, bestemming, bijzonderheden…"></textarea></label>
+      <div class="drawer-actions"><button type="button" class="button danger hidden" id="disconnect-port">Loskoppelen</button><button type="submit" class="button primary">Opslaan</button></div>
+    </form>
+  </aside>
+
+  <dialog id="entity-dialog" class="modal glass">
+    <form id="entity-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Handmatig device</p><h2 id="entity-dialog-title">Device toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="entity_id">
+      <label>Naam<input name="name" required placeholder="bijv. NAS DS223"></label>
+      <div class="field-row"><label>Type<select name="type"><option value="device">Device</option><option value="host">Host</option><option value="nas">NAS</option><option value="camera">Camera</option><option value="router">Router/modem</option><option value="printer">Printer</option><option value="iot">IoT</option></select></label><label>Hostname<input name="hostname"></label></div>
+      <div class="field-row"><label>IP-adres<input name="ip_address" inputmode="decimal"></label><label>MAC-adres<input name="mac_address" placeholder="aa:bb:cc:dd:ee:ff"></label></div>
+      <label>Notities<textarea name="notes" rows="3"></textarea></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="physical-dialog" class="modal glass">
+    <form id="physical-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Patchapparaat</p><h2 id="physical-dialog-title">Netwerkapparaat toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="device_id">
+      <label>Naam<input name="name" required placeholder="bijv. Patchpanel zolder"></label>
+      <div class="field-row"><label>Type<select name="type"><option value="switch">Switch</option><option value="mesh_ap">Mesh access point</option><option value="access_point">Access point</option><option value="patch_panel">Patchpanel</option></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
+      <div class="field-row"><label>Model<input name="model"></label><label>Locatie<input name="location"></label></div>
+      <label>Notities<textarea name="notes" rows="3"></textarea></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="provider-dialog" class="modal wide glass">
+    <form id="provider-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Providerconfiguratie</p><h2 id="provider-dialog-title">Provider</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="provider_id">
+      <div class="field-row"><label class="toggle-label"><input name="enabled" type="checkbox"><span>Provider ingeschakeld</span></label><label>Pollinterval (seconden)<input name="poll_interval_seconds" type="number" min="15" max="86400"></label></div>
+      <label>Configuratie (JSON)<textarea class="code-input" name="config" rows="14" spellcheck="false"></textarea></label>
+      <div id="provider-credentials" class="stack"></div>
+      <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="topology-node-dialog" class="modal glass">
+    <form id="topology-node-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Topologienode</p><h2>Eigenschappen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="node_id"><label>Label<input name="label" required></label><label>Subtitel<input name="subtitle"></label>
+      <div class="field-row"><label>Parent/groep<select name="parent_node_id"><option value="">Geen parent</option></select></label><label>Levenscyclus<select name="lifecycle"><option value="active">Actief</option><option value="planned">Gepland</option><option value="phase_out">Uitfaseren</option></select></label></div>
+      <label class="toggle-label compact"><input name="collapsed" type="checkbox"><span>Groep ingeklapt tonen</span></label>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="delete-topology-group">Groep verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="topology-group-dialog" class="modal glass">
+    <form id="topology-group-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Handmatige groep</p><h2>Groep toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><label>Naam<input name="label" required placeholder="bijv. Clients · LAN/WiFi"></label><label>Subtitel<input name="subtitle" placeholder="optionele toelichting"></label><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div></form>
+  </dialog>
+
+  <dialog id="topology-relation-dialog" class="modal glass">
+    <form id="topology-relation-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Handmatige relatie</p><h2>Relatie tekenen</h2></div><button type="button" class="icon-button modal-close">×</button></div><label>Van<select name="from_node_id" required></select></label><label>Naar<select name="to_node_id" required></select></label><div class="field-row"><label>Type<select name="relation_type"><option value="dependency">Afhankelijkheid</option><option value="service">Service</option><option value="network">Virtueel netwerk</option><option value="uplink">Uplink</option></select></label><label>Label<input name="label" placeholder="bijv. RTSP of MQTT"></label></div><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Relatie opslaan</button></div></form>
+  </dialog>
+
+  <dialog id="dns-dialog" class="modal glass">
+    <form id="dns-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Lokale DNS</p><h2>DNS-record toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><label>Naam<input name="name" required placeholder="service.home.arpa"></label><div class="field-row"><label>Type<select name="record_type"><option>A</option><option>AAAA</option><option>CNAME</option></select></label><label>Waarde<input name="value" required placeholder="192.168.1.12"></label></div><div class="field-row"><label>TTL<input name="ttl" type="number" min="30" max="86400" placeholder="leeg = standaard"></label><label>Gekoppeld device<select name="entity_id"><option value="">Geen</option></select></label></div><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div></form>
+  </dialog>
+
+  <dialog id="speed-dialog" class="modal glass">
+    <form id="speed-form" class="stack"><div class="modal-head"><div><p class="eyebrow">LibreSpeed</p><h2>Speedtestinstellingen</h2></div><button type="button" class="icon-button modal-close">×</button></div><label class="toggle-label compact"><input name="enabled" type="checkbox"><span>Automatische tests ingeschakeld</span></label><div class="field-row"><label>Interval<select name="interval_seconds"><option value="3600">Elk uur</option><option value="21600">Elke 6 uur</option><option value="43200">Elke 12 uur</option><option value="86400">Dagelijks</option></select></label><label>Testduur (seconden)<input name="duration_seconds" type="number" min="5" max="30"></label></div><div class="field-row"><label>Vaste server-ID<input name="server_id" placeholder="leeg = automatisch"></label><label>Netwerkinterface<input name="interface_name" placeholder="leeg = standaardroute"></label></div><p class="muted tiny">Telemetry blijft altijd uitgeschakeld. Resultaten blijven alleen in jouw SQLite-database.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div></form>
+  </dialog>
+
+  <dialog id="merge-dialog" class="modal glass"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
+
+  <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
+
+  <div id="topology-tooltip" class="topology-tooltip hidden"></div>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
