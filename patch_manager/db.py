@@ -510,7 +510,9 @@ class Database:
                 raise RuntimeError("Back-uppakket heeft een onbekend formaat")
             key = archive.read("provider-secrets.key").strip()
             cipher = Fernet(key)
-            with tempfile.TemporaryDirectory(prefix="patch-manager-validate-") as temporary:
+            # Uitpakken naast het bronbestand: /tmp is in de container een kleine
+            # tmpfs, terwijl bundels tot 512 MB database mogen bevatten.
+            with tempfile.TemporaryDirectory(prefix="patch-manager-validate-", dir=source_path.parent) as temporary:
                 database_copy = Path(temporary) / "database.db"
                 with archive.open("database.db") as source, database_copy.open("wb") as destination:
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
@@ -561,7 +563,9 @@ class Database:
             return False
         if secret_key_path is None:
             raise RuntimeError("Voor dit back-uppakket is een sleutelpad vereist")
-        with zipfile.ZipFile(source_path) as archive, tempfile.TemporaryDirectory(prefix="patch-manager-restore-") as temporary:
+        with zipfile.ZipFile(source_path) as archive, tempfile.TemporaryDirectory(
+            prefix="patch-manager-restore-", dir=source_path.parent
+        ) as temporary:
             database_copy = Path(temporary) / "database.db"
             with archive.open("database.db") as source, database_copy.open("wb") as destination:
                 shutil.copyfileobj(source, destination, length=1024 * 1024)

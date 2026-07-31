@@ -508,3 +508,19 @@ def test_stale_speedtest_is_closed_on_startup() -> None:
     run = database.fetch_one("SELECT status,completed_at FROM speedtest_runs WHERE id=?", (run_id,))
     assert run["status"] == "failed"
     assert run["completed_at"]
+
+
+def test_restore_of_corrupt_backup_returns_422() -> None:
+    corrupt = TEST_ROOT / "backups" / "patch-manager-corrupt.db"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"dit is geen sqlite-database")
+    with TestClient(app) as client:
+        csrf = client.post(
+            "/api/auth/login", json={"username": "lucas", "password": "correct horse battery staple"}
+        ).json()["csrf_token"]
+        response = client.post(
+            f"/api/backups/{corrupt.name}/restore?confirm={corrupt.name}",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 422
+        assert "hersteld" in response.json()["detail"]

@@ -12,7 +12,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATCH_BACKUP_DIR=/backups
 
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping \
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping libcap2-bin \
+    # De niet-root gebruiker kan alleen via deze file capability raw ICMP-sockets
+    # openen; de cap moet ook in de container binnen cap_add NET_RAW vallen.
+    && setcap cap_net_raw+ep "$(readlink -f "$(command -v ping)")" \
     && groupadd --gid 10001 patchmanager \
     && useradd --uid 10001 --gid patchmanager --no-create-home --shell /usr/sbin/nologin patchmanager \
     && mkdir -p /data /backups \

@@ -31,8 +31,9 @@ services:
       - ALL
     cap_add:
       - NET_RAW
-    security_opt:
-      - no-new-privileges:true
+    # Geen no-new-privileges hier: de niet-root app krijgt NET_RAW uitsluitend
+    # via de file capability op /usr/bin/ping, en no-new-privileges blokkeert
+    # het toekennen van file capabilities bij execve.
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:

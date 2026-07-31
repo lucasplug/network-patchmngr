@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -891,7 +892,10 @@ def backup_restore(name: str, confirm: str, auth: AuthContext = Depends(write_au
     if confirm != name:
         raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
     safety = create_portable_backup()
-    key_changed = database.restore_backup(path, SECRET_KEY_PATH)
+    try:
+        key_changed = database.restore_backup(path, SECRET_KEY_PATH)
+    except (RuntimeError, sqlite3.Error, zipfile.BadZipFile) as exc:
+        raise HTTPException(422, f"Back-up kan niet worden hersteld: {exc}") from exc
     if key_changed:
         provider_secrets.reload()
     actor = auth.user_id if database.fetch_one("SELECT id FROM users WHERE id=?", (auth.user_id,)) else None

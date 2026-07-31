@@ -50,7 +50,7 @@ PATCH_SESSION_SECURE=true
 
 - **Achter een reverse proxy**: de login-rate-limiting werkt per client-IP. Uvicorn vertrouwt `X-Forwarded-For` standaard alleen vanaf `127.0.0.1`. Draait de proxy op een andere host, geef dan `--forwarded-allow-ips` met het proxy-IP mee aan uvicorn; anders delen alle gebruikers achter de proxy één limiet.
 - **Netwerktoegang beperken**: `PATCH_TRUSTED_SUBNETS` begrenst actieve discovery-scans, maar is geen toegangsfilter voor de webinterface. Beperk webtoegang via de firewall van de Docker-VM of via de reverse proxy.
-- **Containerrechten**: de app draait als niet-root met alleen `NET_RAW` voor ICMP-discovery. Host networking blijft nodig om de LAN-burentabel te kunnen lezen; gebruik daarom een dedicated, vertrouwde Docker-VM.
+- **Containerrechten**: de app draait als niet-root met alleen `NET_RAW` voor ICMP-discovery. Ping krijgt die capability via een file capability op het binary; daarom staat `no-new-privileges` bewust niet op de app-container (dat zou file capabilities bij execve blokkeren). Host networking blijft nodig om de LAN-burentabel te kunnen lezen; gebruik daarom een dedicated, vertrouwde Docker-VM.
 
 ## Providers configureren
 
