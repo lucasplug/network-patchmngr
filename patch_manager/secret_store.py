@@ -18,6 +18,10 @@ class SecretStore:
         self.key_path = key_path
         self._fernet = Fernet(self._load_or_create_key())
 
+    def reload(self) -> None:
+        """Reload the key after a portable backup has been restored."""
+        self._fernet = Fernet(self.key_path.read_bytes().strip())
+
     def _load_or_create_key(self) -> bytes:
         if self.key_path.exists():
             key = self.key_path.read_bytes().strip()

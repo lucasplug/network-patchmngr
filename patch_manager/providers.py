@@ -47,10 +47,21 @@ def reverse_hostname(ip: str) -> str | None:
 class ProviderManager:
     """Read-only provider adapters; only observations may update discovered fields."""
 
-    def __init__(self, database: Database, secrets: SecretStore):
+    def __init__(self, database: Database, secrets: SecretStore, trusted_subnets: tuple[str, ...] = ("127.0.0.0/8",)):
         self.database = database
         self.secrets = secrets
+        self.trusted_networks = tuple(ipaddress.ip_network(value, strict=False) for value in trusted_subnets)
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def _network_is_trusted(self, network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+        return any(network.version == trusted.version and network.subnet_of(trusted) for trusted in self.trusted_networks)
+
+    def _address_is_trusted(self, value: str) -> bool:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return any(address.version == trusted.version and address in trusted for trusted in self.trusted_networks)
 
     async def sync_enabled(self) -> None:
         providers = self.database.fetch_all("SELECT id FROM providers WHERE enabled=1")
@@ -146,7 +157,7 @@ class ProviderManager:
                         (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, now, now, entity_id),
                     )
             else:
-                self._record_manual_conflicts(entity, provider_id, {"name": name, "mac_address": mac_address})
+                self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
                 with self.database.transaction() as connection:
                     connection.execute(
                         "UPDATE entities SET status=?,status_updated_at=?,last_seen_at=? WHERE id=?",
@@ -180,6 +191,10 @@ class ProviderManager:
             for field, value in {"status": status, "ip_address": ip_address, "hostname": hostname}.items():
                 if value is not None:
                     connection.execute(
+                        "DELETE FROM observations WHERE entity_id=? AND provider_id=? AND field=?",
+                        (entity_id, provider_id, field),
+                    )
+                    connection.execute(
                         """INSERT INTO observations(id,entity_id,provider_id,field,value_json,observed_at,expires_at,confidence)
                            VALUES(?,?,?,?,?,?,?,?)""",
                         (str(uuid.uuid4()), entity_id, provider_id, field, json.dumps(value), now, expires, 1.0),
@@ -192,8 +207,12 @@ class ProviderManager:
             manual = entity.get(field)
             if observed and manual and str(observed).lower() != str(manual).lower():
                 existing = self.database.fetch_one(
-                    "SELECT id FROM conflicts WHERE entity_id=? AND provider_id=? AND field=? AND status='open'",
-                    (entity["id"], provider_id, field),
+                    """SELECT id FROM conflicts
+                       WHERE entity_id=? AND provider_id=? AND field=?
+                         AND lower(COALESCE(manual_value,''))=lower(?)
+                         AND lower(COALESCE(observed_value,''))=lower(?)
+                       LIMIT 1""",
+                    (entity["id"], provider_id, field, str(manual), str(observed)),
                 )
                 if not existing:
                     with self.database.transaction() as connection:
@@ -219,8 +238,10 @@ class ProviderManager:
         if config.get("scan"):
             for subnet_value in config.get("subnets", [])[:8]:
                 network = ipaddress.ip_network(subnet_value, strict=False)
+                if not self._network_is_trusted(network):
+                    raise ValueError(f"Subnet {network} valt buiten PATCH_TRUSTED_SUBNETS")
                 if network.num_addresses > 1024:
-                    continue
+                    raise ValueError(f"Subnet {network} bevat meer dan 1024 adressen")
                 semaphore = asyncio.Semaphore(48)
 
                 async def ping(ip: str) -> None:
@@ -241,7 +262,14 @@ class ProviderManager:
 
         count = 0
         for item in found.values():
-            hostname = await asyncio.to_thread(reverse_hostname, item["ip"])
+            if not self._address_is_trusted(item["ip"]):
+                continue
+            try:
+                hostname = (await asyncio.wait_for(
+                    asyncio.to_thread(reverse_hostname, item["ip"]), timeout=2
+                ))
+            except (TimeoutError, asyncio.TimeoutError):
+                hostname = None
             await asyncio.to_thread(
                 self._store_record,
                 provider["id"],
@@ -346,8 +374,6 @@ class ProviderManager:
                 for item in clients:
                     identifiers = item.get("ids") or item.get("ip_addrs") or [item.get("ip")]
                     identifiers = [value for value in identifiers if value]
-                    # AdGuard-identifiers kunnen MAC's, IP's, CIDR's en client-ID's
-                    # door elkaar bevatten; alleen echte IP-literals tellen als adres.
                     mac_address = next((value for value in identifiers if normalize_mac(value)), None)
                     ip_address = next((value for value in identifiers if is_ip_literal(value)), None)
                     external_id = mac_address or ip_address or item.get("name")

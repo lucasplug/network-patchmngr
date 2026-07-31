@@ -1,19 +1,50 @@
 services:
+  patch-manager-init:
+    build: .
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data /backups"]
+    volumes:
+      - patch-data:/data
+      - patch-backups:/backups
+
   patch-manager:
     build: .
     container_name: patch-manager
     restart: unless-stopped
+    depends_on:
+      patch-manager-init:
+        condition: service_completed_successfully
     # Host networking lets DHCP/ARP discovery see the Docker VM's LAN table.
     # This deployment target is a dedicated Linux Docker VM in Proxmox.
     network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     environment:
       TZ: "${TZ:-Europe/Amsterdam}"
       PATCH_SESSION_SECURE: "${PATCH_SESSION_SECURE:-false}"
+      PATCH_TRUSTED_SUBNETS: "${PATCH_TRUSTED_SUBNETS:-192.168.1.0/24,127.0.0.0/8}"
       PATCH_BACKUP_SCHEDULE_HOUR: "${PATCH_BACKUP_SCHEDULE_HOUR:-3}"
       PATCH_BACKUP_RETENTION_DAILY: "${PATCH_BACKUP_RETENTION_DAILY:-14}"
     volumes:
       - patch-data:/data
-      - ./backups:/backups
+      - patch-backups:/backups
 
 volumes:
   patch-data:
+  patch-backups:

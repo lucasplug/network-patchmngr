@@ -34,7 +34,9 @@ docker compose up -d --build
 
 Open `http://<docker-vm-ip>:8080`. De eerste bezoeker maakt het eenmalige beheeraccount aan. Daarna verdwijnt de setup-route automatisch. De container gebruikt host networking op de Linux Docker-VM, zodat DHCP/ARP-discovery de LAN-burentabel kan gebruiken; poort 8080 moet daarom vrij zijn op die VM.
 
-De zichtbare applicatietitel wijzig je onder **Admin → Applicatie**. Zo kan dezelfde openbare code onder een eigen naam worden gebruikt. Providergeheimen staan niet in de repository of configuratie-export. Bewaar bij een volledige migratie ook het Docker-volume `patch-data`; daarin staat naast de database de lokale sleutel waarmee providergegevens zijn versleuteld.
+De zichtbare applicatietitel wijzig je onder **Admin → Applicatie**. Zo kan dezelfde openbare code onder een eigen naam worden gebruikt. Providergeheimen staan niet in de repository of configuratie-export. Admin-back-ups zijn draagbare `.pmbackup`-pakketten met de database en bijbehorende encryptiesleutel. Behandel zo'n bestand daarom als een wachtwoord en bewaar het versleuteld.
+
+Bij een upgrade vanaf een oudere versie zet een korte, netwerkloze initialisatiestap automatisch de juiste rechten op het bestaande datavolume. Bestaande `.db`-bestanden blijven in de lokale map `./backups` staan en kun je via **Admin → Back-ups → Importeren** blijven gebruiken. Nieuwe back-ups worden in het afgeschermde Docker-volume `patch-backups` bewaard.
 
 ### HTTPS
 
@@ -47,8 +49,8 @@ PATCH_SESSION_SECURE=true
 ## Beveiligingsnotities
 
 - **Achter een reverse proxy**: de login-rate-limiting werkt per client-IP. Uvicorn vertrouwt `X-Forwarded-For` standaard alleen vanaf `127.0.0.1`. Draait de proxy op een andere host, geef dan `--forwarded-allow-ips` met het proxy-IP mee aan uvicorn; anders delen alle gebruikers achter de proxy één limiet.
-- **Netwerktoegang beperken**: de app doet zelf geen IP-filtering. Beperk toegang via de firewall van de Docker-VM of via de reverse proxy.
-- **Container draait als root met host networking**: dit is nodig voor de ARP-tabel en ICMP-discovery op het LAN. Draai de container daarom alleen op een dedicated, vertrouwde Docker-VM.
+- **Netwerktoegang beperken**: `PATCH_TRUSTED_SUBNETS` begrenst actieve discovery-scans, maar is geen toegangsfilter voor de webinterface. Beperk webtoegang via de firewall van de Docker-VM of via de reverse proxy.
+- **Containerrechten**: de app draait als niet-root met alleen `NET_RAW` voor ICMP-discovery. Host networking blijft nodig om de LAN-burentabel te kunnen lezen; gebruik daarom een dedicated, vertrouwde Docker-VM.
 
 ## Providers configureren
 
@@ -100,10 +102,10 @@ De Docker-image bouwt `librespeed-cli` mee. Standaard wordt elke zes uur vanaf d
 - Dagelijks op het uur uit `PATCH_BACKUP_SCHEDULE_HOUR` (standaard 03:00).
 - Consistente SQLite online-back-up, gevolgd door `PRAGMA integrity_check`.
 - Standaard 14 dagelijkse kopieën; instelbaar met `PATCH_BACKUP_RETENTION_DAILY`.
-- Bestanden staan in `./backups` op de Docker-host.
+- Bestanden staan in het blijvende Docker-volume `patch-backups` en zijn via Admin te downloaden.
 - Een handmatige back-up kan vanuit Admin worden gestart.
 
-Neem `./backups` op in de normale Proxmox/VM-back-upstrategie. Back-ups worden nooit in het actieve databasevolume bewaard.
+Neem de volumes `patch-data` en `patch-backups` op in de normale Proxmox/VM-back-upstrategie. Back-ups staan nooit in het actieve databasevolume.
 
 ## Lokaal ontwikkelen
 

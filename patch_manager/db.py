@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
+import tempfile
 import uuid
+import zipfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
+
+from cryptography.fernet import Fernet, InvalidToken
 
 
 def utcnow() -> str:
@@ -413,6 +419,23 @@ class Database:
         with self.transaction() as connection:
             connection.execute("DELETE FROM sessions WHERE expires_at < ?", (utcnow(),))
 
+    def clean_observations(self) -> None:
+        """Remove expired samples and collapse historical duplicates per source field."""
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM observations WHERE expires_at IS NOT NULL AND expires_at <= ?", (utcnow(),))
+            connection.execute(
+                """DELETE FROM observations
+                   WHERE id IN (
+                     SELECT id FROM (
+                       SELECT id,ROW_NUMBER() OVER (
+                         PARTITION BY entity_id,provider_id,field
+                         ORDER BY observed_at DESC,id DESC
+                       ) AS position
+                       FROM observations
+                     ) WHERE position > 1
+                   )"""
+            )
+
     def create_backup(self, backup_dir: Path) -> Path:
         backup_dir.mkdir(parents=True, exist_ok=True)
         target = backup_dir / f"patch-manager-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}.db"
@@ -428,10 +451,34 @@ class Database:
             source.close()
         return target
 
-    def restore_backup(self, source_path: Path) -> None:
-        source = sqlite3.connect(source_path)
-        destination = self.connect()
+    def create_backup_bundle(self, backup_dir: Path, secret_key_path: Path) -> Path:
+        """Create a portable backup containing both SQLite data and its encryption key."""
+        if not secret_key_path.is_file():
+            raise RuntimeError("De sleutel voor providergegevens ontbreekt")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = backup_dir / f"patch-manager-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}.pmbackup"
         try:
+            with tempfile.TemporaryDirectory(prefix="patch-manager-backup-", dir=backup_dir) as temporary:
+                database_copy = self.create_backup(Path(temporary))
+                manifest = {
+                    "format": "plugnet-backup",
+                    "version": 1,
+                    "created_at": utcnow(),
+                }
+                with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(database_copy, "database.db")
+                    archive.write(secret_key_path, "provider-secrets.key")
+                    archive.writestr("manifest.json", json.dumps(manifest, separators=(",", ":")))
+            os.chmod(target, 0o600)
+            self.validate_backup(target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+
+    @staticmethod
+    def _validate_sqlite(source_path: Path) -> None:
+        with sqlite3.connect(source_path) as source:
             result = source.execute("PRAGMA integrity_check").fetchone()
             if not result or result[0] != "ok":
                 raise RuntimeError("Back-up is geen geldige SQLite-database")
@@ -439,6 +486,52 @@ class Database:
             tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not required.issubset(tables):
                 raise RuntimeError("Back-up mist vereiste Patch Manager-tabellen")
+
+    @classmethod
+    def validate_backup(cls, source_path: Path) -> dict[str, Any]:
+        if not zipfile.is_zipfile(source_path):
+            cls._validate_sqlite(source_path)
+            return {"format": "legacy-sqlite", "portable": False}
+        with zipfile.ZipFile(source_path) as archive:
+            names = set(archive.namelist())
+            required = {"database.db", "provider-secrets.key", "manifest.json"}
+            if not required.issubset(names):
+                raise RuntimeError("Back-uppakket mist database, sleutel of manifest")
+            if any(archive.namelist().count(name) != 1 for name in required):
+                raise RuntimeError("Back-uppakket bevat dubbele essentiële bestanden")
+            if any(name.startswith("/") or ".." in Path(name).parts for name in names):
+                raise RuntimeError("Back-uppakket bevat onveilige paden")
+            if sum(item.file_size for item in archive.infolist()) > 512 * 1024 * 1024:
+                raise RuntimeError("Uitgepakte back-up is groter dan 512 MB")
+            if archive.getinfo("manifest.json").file_size > 64 * 1024 or archive.getinfo("provider-secrets.key").file_size > 1024:
+                raise RuntimeError("Back-upmanifest of sleutel is ongeldig groot")
+            manifest = json.loads(archive.read("manifest.json"))
+            if manifest.get("format") != "plugnet-backup" or manifest.get("version") != 1:
+                raise RuntimeError("Back-uppakket heeft een onbekend formaat")
+            key = archive.read("provider-secrets.key").strip()
+            cipher = Fernet(key)
+            with tempfile.TemporaryDirectory(prefix="patch-manager-validate-") as temporary:
+                database_copy = Path(temporary) / "database.db"
+                with archive.open("database.db") as source, database_copy.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                cls._validate_sqlite(database_copy)
+                with sqlite3.connect(database_copy) as source:
+                    has_secrets = source.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_secrets'"
+                    ).fetchone()
+                    rows = source.execute("SELECT encrypted_json FROM provider_secrets").fetchall() if has_secrets else []
+                    try:
+                        for row in rows:
+                            cipher.decrypt(row[0].encode())
+                    except InvalidToken as exc:
+                        raise RuntimeError("Back-upsleutel past niet bij de providergegevens") from exc
+        return {"format": "plugnet-backup", "portable": True, "manifest": manifest}
+
+    def _restore_sqlite(self, source_path: Path) -> None:
+        self._validate_sqlite(source_path)
+        source = sqlite3.connect(source_path)
+        destination = self.connect()
+        try:
             source.backup(destination)
             destination.commit()
         finally:
@@ -446,9 +539,51 @@ class Database:
             source.close()
         self.initialize()
 
+    def restore_backup(self, source_path: Path, secret_key_path: Path | None = None) -> bool:
+        """Restore a portable bundle, or a legacy SQLite backup using the current key."""
+        metadata = self.validate_backup(source_path)
+        if metadata["format"] == "legacy-sqlite":
+            if secret_key_path and secret_key_path.is_file():
+                cipher = Fernet(secret_key_path.read_bytes().strip())
+                with sqlite3.connect(source_path) as source:
+                    has_secrets = source.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_secrets'"
+                    ).fetchone()
+                    rows = source.execute("SELECT encrypted_json FROM provider_secrets").fetchall() if has_secrets else []
+                    try:
+                        for row in rows:
+                            cipher.decrypt(row[0].encode())
+                    except InvalidToken as exc:
+                        raise RuntimeError(
+                            "Deze oude SQLite-back-up hoort bij een andere encryptiesleutel; importeer een .pmbackup-bestand"
+                        ) from exc
+            self._restore_sqlite(source_path)
+            return False
+        if secret_key_path is None:
+            raise RuntimeError("Voor dit back-uppakket is een sleutelpad vereist")
+        with zipfile.ZipFile(source_path) as archive, tempfile.TemporaryDirectory(prefix="patch-manager-restore-") as temporary:
+            database_copy = Path(temporary) / "database.db"
+            with archive.open("database.db") as source, database_copy.open("wb") as destination:
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+            secret_key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_copy = secret_key_path.with_name(f".{secret_key_path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                key_copy.write_bytes(archive.read("provider-secrets.key").strip() + b"\n")
+                os.chmod(key_copy, 0o600)
+                self._restore_sqlite(database_copy)
+                os.replace(key_copy, secret_key_path)
+                os.chmod(secret_key_path, 0o600)
+            finally:
+                key_copy.unlink(missing_ok=True)
+        return True
+
     @staticmethod
     def prune_backups(backup_dir: Path, keep: int) -> None:
-        backups = sorted(backup_dir.glob("patch-manager-*.db"), reverse=True)
+        backups = sorted(
+            [*backup_dir.glob("patch-manager-*.pmbackup"), *backup_dir.glob("patch-manager-*.db")],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
         for stale in backups[keep:]:
             stale.unlink(missing_ok=True)
 

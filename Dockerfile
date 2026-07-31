@@ -13,13 +13,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping \
+    && groupadd --gid 10001 patchmanager \
+    && useradd --uid 10001 --gid patchmanager --no-create-home --shell /usr/sbin/nologin patchmanager \
+    && mkdir -p /data /backups \
+    && chown -R patchmanager:patchmanager /app /data /backups \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=speedtest-builder /out/librespeed-cli /usr/local/bin/librespeed-cli
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2 \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY patch_manager ./patch_manager
 COPY static ./static
+
+USER 10001:10001
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \

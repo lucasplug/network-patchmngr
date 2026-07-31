@@ -37,6 +37,16 @@ class SpeedtestManager:
         )
         return {"settings": settings, "latest": latest, "running": running, "history": history}
 
+    def recover_stale_runs(self) -> None:
+        """A running subprocess cannot survive an application/container restart."""
+        completed = utcnow()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE speedtest_runs SET status='failed',error=?,completed_at=?
+                   WHERE status='running'""",
+                ("Speedtest onderbroken door een herstart", completed),
+            )
+
     async def run(self) -> dict[str, Any]:
         if self.lock.locked():
             return {"status": "busy"}
@@ -62,6 +72,7 @@ class SpeedtestManager:
                 command += ["--server", str(settings["server_id"])]
             if settings.get("interface_name"):
                 command += ["--interface", str(settings["interface_name"])]
+            process: asyncio.subprocess.Process | None = None
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -91,12 +102,22 @@ class SpeedtestManager:
                     connection.execute("UPDATE speedtest_settings SET last_error=NULL,updated_at=? WHERE id=1", (completed,))
                 return {"status": "success", "id": run_id, **parsed}
             except (TimeoutError, asyncio.TimeoutError):
-                # wait_for annuleert alleen het wachten; het CLI-proces zelf
-                # moet expliciet worden gestopt om lekken te voorkomen.
-                with suppress(ProcessLookupError):
-                    process.kill()
-                await process.wait()
+                if process and process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        process.kill()
+                        with suppress(Exception):
+                            await process.wait()
                 return self._fail(run_id, "Speedtest heeft de tijdslimiet overschreden")
+            except asyncio.CancelledError:
+                if process and process.returncode is None:
+                    process.kill()
+                    with suppress(Exception):
+                        await process.wait()
+                self._fail(run_id, "Speedtest is geannuleerd")
+                raise
             except (json.JSONDecodeError, KeyError, ValueError) as exc:
                 return self._fail(run_id, f"Onverwacht LibreSpeed-resultaat: {exc}")
             except (OSError, TypeError) as exc:
