@@ -36,6 +36,7 @@ yarn-error.log*
 /.venv/
 /data/
 /backups/*.db
+/backups/*.pmbackup
 /__pycache__/
 /.pytest_cache/
 *.pyc

@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,20 +34,21 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 database = Database(settings.database_path)
-provider_secrets = SecretStore(database, settings.data_dir / "provider-secrets.key")
-providers = ProviderManager(database, provider_secrets)
+SECRET_KEY_PATH = settings.data_dir / "provider-secrets.key"
+provider_secrets = SecretStore(database, SECRET_KEY_PATH)
+providers = ProviderManager(database, provider_secrets, settings.trusted_subnets)
 speedtests = SpeedtestManager(database)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SESSION_COOKIE = "plugnet_session"
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_WINDOW_SECONDS = 300
 BACKUP_IMPORT_MAX_BYTES = 512 * 1024 * 1024
-# Vaste hash zodat een login voor een onbekende gebruikersnaam evenveel tijd
-# kost als voor een bestaande (geen username-enumeratie via timing).
 DUMMY_PASSWORD_HASH = hash_password("timing-equalizer-not-a-real-password")
-# Referenties naar fire-and-forget taken; zonder referentie mag asyncio een
-# lopende taak garbage-collecten.
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def create_portable_backup() -> Path:
+    return database.create_backup_bundle(settings.backup_dir, SECRET_KEY_PATH)
 
 
 @dataclass
@@ -261,8 +263,9 @@ def _prune_login_attempts() -> None:
 
 
 def _maintenance_housekeeping() -> list[dict[str, Any]]:
-    """Blocking database housekeeping, uitgevoerd buiten de event loop."""
+    """Run blocking SQLite housekeeping outside the event loop."""
     database.clean_sessions()
+    database.clean_observations()
     _prune_login_attempts()
     with database.transaction() as connection:
         connection.execute(
@@ -273,9 +276,7 @@ def _maintenance_housekeeping() -> list[dict[str, Any]]:
                )""",
             (utcnow(), utcnow()),
         )
-    return database.fetch_all(
-        """SELECT id,poll_interval_seconds,last_run_at FROM providers WHERE enabled=1"""
-    )
+    return database.fetch_all("SELECT id,poll_interval_seconds,last_run_at FROM providers WHERE enabled=1")
 
 
 async def maintenance_loop() -> None:
@@ -299,8 +300,10 @@ async def maintenance_loop() -> None:
                     BACKGROUND_TASKS.add(task)
                     task.add_done_callback(BACKGROUND_TASKS.discard)
             if now.hour == settings.backup_schedule_hour and last_backup_date != now.date():
-                await asyncio.to_thread(database.create_backup, settings.backup_dir)
-                await asyncio.to_thread(database.prune_backups, settings.backup_dir, settings.backup_retention_daily)
+                await asyncio.to_thread(create_portable_backup)
+                await asyncio.to_thread(
+                    database.prune_backups, settings.backup_dir, settings.backup_retention_daily
+                )
                 last_backup_date = now.date()
         except Exception:
             logger.exception("Onderhoudslus is mislukt; nieuwe poging over 30 seconden")
@@ -310,6 +313,7 @@ async def maintenance_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.initialize()
+    speedtests.recover_stale_runs()
     task = asyncio.create_task(maintenance_loop())
     yield
     task.cancel()
@@ -503,7 +507,6 @@ def update_entity(entity_id: str, payload: EntityInput, auth: AuthContext = Depe
     if not entity:
         raise HTTPException(404, "Device niet gevonden")
     if entity["origin"] != "manual":
-        # De volgende providersync zou een lokale bewerking stil overschrijven.
         raise HTTPException(409, "Een geïmporteerd device bewerk je in de databron of via samenvoegen")
     with database.transaction() as connection:
         connection.execute(
@@ -817,9 +820,12 @@ def resolve_conflict(conflict_id: str, payload: ConflictInput, auth: AuthContext
 
 
 def list_backups() -> list[dict[str, Any]]:
+    candidates = [*settings.backup_dir.glob("patch-manager-*.pmbackup"), *settings.backup_dir.glob("patch-manager-*.db")]
     return [
-        {"name": path.name, "size": path.stat().st_size, "created_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()}
-        for path in sorted(settings.backup_dir.glob("patch-manager-*.db"), reverse=True)[:50]
+        {"name": path.name, "size": path.stat().st_size,
+         "created_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+         "portable": path.suffix == ".pmbackup"}
+        for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[:50]
     ]
 
 
@@ -830,14 +836,14 @@ def backups_list(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]
 
 @app.post("/api/backups")
 def backup_create(auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
-    path = database.create_backup(settings.backup_dir)
+    path = create_portable_backup()
     database.prune_backups(settings.backup_dir, settings.backup_retention_daily)
     database.audit(auth.user_id, "backup.create", "backup", path.name)
     return {"name": path.name, "size": path.stat().st_size}
 
 
 def backup_path(name: str) -> Path:
-    if Path(name).name != name or not name.startswith("patch-manager-") or not name.endswith(".db"):
+    if Path(name).name != name or not name.startswith("patch-manager-") or Path(name).suffix not in {".db", ".pmbackup"}:
         raise HTTPException(400, "Ongeldige back-upnaam")
     path = settings.backup_dir / name
     if not path.is_file():
@@ -848,38 +854,36 @@ def backup_path(name: str) -> Path:
 @app.get("/api/backups/{name}/download")
 def backup_download(name: str, _: AuthContext = Depends(current_auth)) -> FileResponse:
     path = backup_path(name)
-    return FileResponse(path, filename=path.name, media_type="application/vnd.sqlite3")
+    media_type = "application/zip" if path.suffix == ".pmbackup" else "application/vnd.sqlite3"
+    return FileResponse(path, filename=path.name, media_type=media_type)
 
 
 @app.post("/api/backups/import")
 async def backup_import(file: UploadFile = File(...), auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     settings.backup_dir.mkdir(parents=True, exist_ok=True)
-    path = settings.backup_dir / f"patch-manager-imported-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}.db"
-    # Stream in blokken naar schijf zodat een te grote upload nooit eerst
-    # volledig in het geheugen belandt.
+    temporary = settings.backup_dir / f".patch-manager-upload-{uuid.uuid4().hex}.tmp"
     size = 0
     try:
-        with path.open("wb") as handle:
+        with temporary.open("wb") as handle:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > BACKUP_IMPORT_MAX_BYTES:
                     raise HTTPException(413, "Back-up is groter dan 512 MB")
                 handle.write(chunk)
+        metadata = database.validate_backup(temporary)
+        suffix = ".pmbackup" if metadata["portable"] else ".db"
+        path = settings.backup_dir / f"patch-manager-imported-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}{suffix}"
+        temporary.replace(path)
+        path.chmod(0o600)
+        database.prune_backups(settings.backup_dir, settings.backup_retention_daily)
     except HTTPException:
-        path.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
         raise
-    try:
-        with sqlite3.connect(path) as connection:
-            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise ValueError("integriteitscontrole mislukt")
-            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"users", "entities", "physical_devices"}.issubset(tables):
-                raise ValueError("vereiste tabellen ontbreken")
-    except (sqlite3.Error, ValueError) as exc:
-        path.unlink(missing_ok=True)
+    except (sqlite3.Error, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        temporary.unlink(missing_ok=True)
         raise HTTPException(422, f"Ongeldige Patch Manager-back-up: {exc}") from exc
     database.audit(auth.user_id, "backup.import", "backup", path.name, {"original_name": file.filename, "size": size})
-    return {"name": path.name, "size": size}
+    return {"name": path.name, "size": size, "portable": suffix == ".pmbackup"}
 
 
 @app.post("/api/backups/{name}/restore")
@@ -887,8 +891,13 @@ def backup_restore(name: str, confirm: str, auth: AuthContext = Depends(write_au
     path = backup_path(name)
     if confirm != name:
         raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
-    safety = database.create_backup(settings.backup_dir)
-    database.restore_backup(path)
+    safety = create_portable_backup()
+    try:
+        key_changed = database.restore_backup(path, SECRET_KEY_PATH)
+    except (RuntimeError, sqlite3.Error, zipfile.BadZipFile) as exc:
+        raise HTTPException(422, f"Back-up kan niet worden hersteld: {exc}") from exc
+    if key_changed:
+        provider_secrets.reload()
     actor = auth.user_id if database.fetch_one("SELECT id FROM users WHERE id=?", (auth.user_id,)) else None
     database.audit(actor, "backup.restore", "backup", name, {"safety_backup": safety.name})
     return {"ok": True}
@@ -919,8 +928,10 @@ def config_export(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
 def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     if payload.get("format") != "plugnet-config" or payload.get("version") != 1 or not isinstance(payload.get("tables"), dict):
         raise HTTPException(422, "Dit is geen ondersteund Plugnet-configuratiebestand")
-    database.create_backup(settings.backup_dir)
+    create_portable_backup()
+    database.prune_backups(settings.backup_dir, settings.backup_retention_daily)
     imported = 0
+    entity_parents: list[tuple[str, str]] = []
     try:
         with database.transaction() as connection:
             imported_settings = payload.get("settings") or {}
@@ -944,6 +955,9 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     if not isinstance(raw, dict) or primary not in raw:
                         raise ValueError(f"Record in {table} mist {primary}")
                     row = {key: raw[key] for key in allowed if key in raw}
+                    if table == "entities" and row.get("parent_id"):
+                        entity_parents.append((str(row["parent_id"]), str(row[primary])))
+                        row["parent_id"] = None
                     if table == "port_assignments":
                         row["updated_by"] = None
                     if table == "topology_nodes":
@@ -956,6 +970,8 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     )
                     connection.execute(sql, tuple(row[column] for column in columns))
                     imported += 1
+            for parent_id, entity_id in entity_parents:
+                connection.execute("UPDATE entities SET parent_id=? WHERE id=?", (parent_id, entity_id))
             for raw in payload["tables"].get("topology_nodes", []):
                 if raw.get("parent_node_id"):
                     connection.execute(
@@ -1056,6 +1072,24 @@ def topology_group_selection(payload: TopologyGroupSelectionInput, auth: AuthCon
         raise HTTPException(422, "Een groep kan niet zichzelf bevatten")
     if not database.fetch_one("SELECT id FROM topology_nodes WHERE id=? AND reference_type='group'", (payload.parent_node_id,)):
         raise HTTPException(404, "Doelgroep niet gevonden")
+    placeholders = ",".join("?" for _ in payload.node_ids)
+    existing_nodes = {
+        row["id"] for row in database.fetch_all(
+            f"SELECT id FROM topology_nodes WHERE id IN ({placeholders})", tuple(payload.node_ids)
+        )
+    }
+    if existing_nodes != set(payload.node_ids):
+        raise HTTPException(404, "Een of meer geselecteerde nodes bestaan niet")
+    for node_id in payload.node_ids:
+        descendants = database.fetch_all(
+            """WITH RECURSIVE tree(id) AS (
+                 SELECT id FROM topology_nodes WHERE parent_node_id=?
+                 UNION ALL SELECT n.id FROM topology_nodes n JOIN tree t ON n.parent_node_id=t.id
+               ) SELECT id FROM tree""",
+            (node_id,),
+        )
+        if payload.parent_node_id in {row["id"] for row in descendants}:
+            raise HTTPException(422, "Deze groepskeuze zou een cirkel in de topologie maken")
     capture_topology(database, f"{len(payload.node_ids)} nodes gegroepeerd", auth.user_id)
     with database.transaction() as connection:
         for node_id in payload.node_ids:
