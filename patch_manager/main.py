@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 import sqlite3
 import time
 import uuid
@@ -196,6 +198,20 @@ class EntityMergeInput(BaseModel):
 
 class ProviderMappingInput(BaseModel):
     entity_id: str | None = None
+
+
+class ProviderTestInput(BaseModel):
+    config: dict[str, Any]
+    credentials: dict[str, str | None] = Field(default_factory=dict)
+
+
+class PromoteInput(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
+    type: str | None = Field(default=None, max_length=40)
+
+
+class WizardStateInput(BaseModel):
+    dismissed: bool
 
 
 PROVIDER_CREDENTIAL_FIELDS: dict[str, list[dict[str, str]]] = {
@@ -581,6 +597,88 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     }
 
 
+def local_subnet_suggestion() -> str | None:
+    """Het subnet van deze host binnen PATCH_TRUSTED_SUBNETS, als voorstel."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(0.2)
+            probe.connect(("192.0.2.1", 9))  # TEST-NET-1: stuurt niets, kiest alleen route
+            local_ip = ipaddress.ip_address(probe.getsockname()[0])
+    except OSError:
+        return None
+    for value in settings.trusted_subnets:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if local_ip.version == network.version and local_ip in network and network.num_addresses <= 1024:
+            return str(network)
+    return None
+
+
+@app.get("/api/wizard/info")
+def wizard_info(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    row = database.fetch_one("SELECT value FROM app_meta WHERE key='wizard_dismissed'")
+    return {
+        "dismissed": bool(row and row["value"] == "1"),
+        "suggested_subnet": local_subnet_suggestion(),
+        "trusted_subnets": list(settings.trusted_subnets),
+    }
+
+
+@app.patch("/api/wizard/info")
+def wizard_state(payload: WizardStateInput, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO app_meta(key,value) VALUES('wizard_dismissed',?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            ("1" if payload.dismissed else "0",),
+        )
+    database.audit(auth.user_id, "wizard.state", "application", "wizard", payload.model_dump())
+    return {"dismissed": payload.dismissed}
+
+
+@app.get("/api/discoveries")
+def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
+    """Open discoveries voor het bulk-toewijsscherm (ook los van de wizard)."""
+    linked = {
+        row["b_entity_id"]
+        for row in database.fetch_all("SELECT b_entity_id FROM cables WHERE b_entity_id IS NOT NULL")
+    }
+    rows = database.fetch_all(
+        """SELECT e.id,e.name,e.type,e.status,e.ip_address,e.mac_address,e.hostname,e.vendor,
+                  e.first_seen_at,e.last_seen_at,
+                  (SELECT GROUP_CONCAT(p.name,', ') FROM provider_records pr
+                     JOIN providers p ON p.id=pr.provider_id WHERE pr.entity_id=e.id) AS sources
+           FROM entities e
+           WHERE e.origin='discovered' AND e.ignored=0 AND e.archived=0
+           ORDER BY e.first_seen_at DESC,e.name"""
+    )
+    for row in rows:
+        row["linked"] = row["id"] in linked
+    return rows
+
+
+@app.post("/api/entities/{entity_id}/promote")
+def promote_entity(entity_id: str, payload: PromoteInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Neem een discovery over als handmatig device; providers blijven observeren."""
+    entity = database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+    if not entity:
+        raise HTTPException(404, "Device niet gevonden")
+    if entity["origin"] != "discovered":
+        raise HTTPException(409, "Dit device is al handmatig")
+    name = (payload.name or entity["name"]).strip()
+    if not name:
+        raise HTTPException(422, "Naam mag niet leeg zijn")
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE entities SET origin='manual',name=?,type=?,ignored=0,archived=0,updated_at=? WHERE id=?",
+            (name, payload.type or entity["type"], utcnow(), entity_id),
+        )
+    database.audit(auth.user_id, "entity.promote", "entity", entity_id, {"name": name})
+    return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+
+
 @app.post("/api/entities")
 def create_entity(payload: EntityInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     entity_id = str(uuid.uuid4())
@@ -963,6 +1061,20 @@ def update_app_settings(payload: AppSettingsInput, auth: AuthContext = Depends(w
         )
     database.audit(auth.user_id, "settings.update", "application", "title", {"title": title})
     return {"title": title}
+
+
+@app.post("/api/providers/{provider_id}/test")
+async def test_provider(
+    provider_id: str, payload: ProviderTestInput, _: AuthContext = Depends(write_auth)
+) -> dict[str, Any]:
+    """Proefverbinding vóór opslaan: gebruikt de opgegeven gegevens, bewaart niets."""
+    provider = database.fetch_one("SELECT type FROM providers WHERE id=?", (provider_id,))
+    if not provider:
+        raise HTTPException(404, "Provider niet gevonden")
+    allowed = {field["key"] for field in PROVIDER_CREDENTIAL_FIELDS.get(provider["type"], [])}
+    if not set(payload.credentials).issubset(allowed):
+        raise HTTPException(422, "Onbekend credentialveld voor deze provider")
+    return await providers.test_one(provider_id, payload.config, payload.credentials)
 
 
 @app.post("/api/providers/{provider_id}/sync")

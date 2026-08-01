@@ -73,6 +73,11 @@ async function showApp() {
   $("#auth-view").classList.add("hidden");
   $("#app-shell").classList.remove("hidden");
   await loadData();
+  // Na de allereerste setup meteen begeleid inrichten; daarna alleen op verzoek.
+  try {
+    const info = await api("/api/wizard/info");
+    if (!info.dismissed) await openWizard();
+  } catch { /* wizard is optioneel */ }
 }
 
 async function loadData(silent = false) {
@@ -522,14 +527,14 @@ document.addEventListener("click", async event => {
 
 $("#auth-form").addEventListener("submit", async event => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const element = event.currentTarget, form = new FormData(element);
   $("#auth-error").textContent = "";
   try {
     const result = await api(state.setupRequired ? "/api/auth/setup" : "/api/auth/login", {method:"POST", body:JSON.stringify(Object.fromEntries(form))});
     state.csrf = result.csrf_token;
     $("#username").textContent = result.username;
     $("#avatar").textContent = result.username.slice(0,1).toUpperCase();
-    event.currentTarget.reset();
+    element.reset();
     await showApp();
   } catch (error) { $("#auth-error").textContent = error.message; }
 });
@@ -544,13 +549,13 @@ $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $$('[data-layer]').forEach(input => input.addEventListener("change", renderTopology));
 
 $("#entity-form").addEventListener("submit", async event => {
-  event.preventDefault(); const payload = Object.fromEntries(new FormData(event.currentTarget)),entityId=payload.entity_id;delete payload.entity_id;
-  try { await api(entityId?`/api/entities/${entityId}`:"/api/entities", {method:entityId?"PATCH":"POST", body:JSON.stringify(payload)}); event.currentTarget.reset(); $("#entity-dialog").close(); await loadData(true); toast(entityId?"Device bijgewerkt":"Device toegevoegd"); } catch(error){toast(error.message,"error");}
+  event.preventDefault(); const form=event.currentTarget, payload = Object.fromEntries(new FormData(form)),entityId=payload.entity_id;delete payload.entity_id;
+  try { await api(entityId?`/api/entities/${entityId}`:"/api/entities", {method:entityId?"PATCH":"POST", body:JSON.stringify(payload)}); form.reset(); $("#entity-dialog").close(); await loadData(true); toast(entityId?"Device bijgewerkt":"Device toegevoegd"); } catch(error){toast(error.message,"error");}
 });
 
 $("#physical-form").addEventListener("submit", async event => {
-  event.preventDefault(); const payload = Object.fromEntries(new FormData(event.currentTarget)),deviceId=payload.device_id;delete payload.device_id;payload.ports = Number(payload.ports);
-  try { await api(deviceId?`/api/physical-devices/${deviceId}`:"/api/physical-devices", {method:deviceId?"PATCH":"POST", body:JSON.stringify(payload)}); event.currentTarget.reset(); $("#physical-dialog").close(); await loadData(true); toast(deviceId?"Netwerkapparaat bijgewerkt":"Netwerkapparaat toegevoegd"); } catch(error){toast(error.message,"error");}
+  event.preventDefault(); const form=event.currentTarget, payload = Object.fromEntries(new FormData(form)),deviceId=payload.device_id;delete payload.device_id;payload.ports = Number(payload.ports);
+  try { await api(deviceId?`/api/physical-devices/${deviceId}`:"/api/physical-devices", {method:deviceId?"PATCH":"POST", body:JSON.stringify(payload)}); form.reset(); $("#physical-dialog").close(); await loadData(true); toast(deviceId?"Netwerkapparaat bijgewerkt":"Netwerkapparaat toegevoegd"); } catch(error){toast(error.message,"error");}
 });
 
 $("#port-form").addEventListener("submit", async event => {
@@ -589,8 +594,9 @@ $("#provider-form").addEventListener("submit", async event => {
 
 $("#app-settings-form").addEventListener("submit", async event => {
   event.preventDefault();
+  const form = event.currentTarget;
   try {
-    const result = await api("/api/settings", {method:"PATCH", body:JSON.stringify({title:event.currentTarget.elements.title.value})});
+    const result = await api("/api/settings", {method:"PATCH", body:JSON.stringify({title:form.elements.title.value})});
     state.data.site.title = result.title;
     applyBranding(result);
     toast("Titel opgeslagen");
@@ -598,12 +604,13 @@ $("#app-settings-form").addEventListener("submit", async event => {
 });
 
 $("#backup-now").addEventListener("click", async event => {
-  event.currentTarget.disabled = true;
-  try { const backup = await api("/api/backups", {method:"POST"}); await loadData(true); toast(`Back-up ${backup.name} gemaakt`); } catch(error){toast(error.message,"error");} finally {event.currentTarget.disabled=false;}
+  const button = event.currentTarget;
+  button.disabled = true;
+  try { const backup = await api("/api/backups", {method:"POST"}); await loadData(true); toast(`Back-up ${backup.name} gemaakt`); } catch(error){toast(error.message,"error");} finally {button.disabled=false;}
 });
 
-$("#merge-form").addEventListener("submit",async event=>{event.preventDefault();const payload=Object.fromEntries(new FormData(event.currentTarget)),source=payload.source_entity_id;delete payload.source_entity_id;try{await api(`/api/entities/${source}/merge`,{method:"POST",body:JSON.stringify(payload)});event.currentTarget.closest("dialog").close();await loadData(true);toast("Discovery samengevoegd");}catch(error){toast(error.message,"error");}});
-$("#mapping-form").addEventListener("submit",async event=>{event.preventDefault();const payload=Object.fromEntries(new FormData(event.currentTarget)),recordId=payload.record_id;delete payload.record_id;payload.entity_id=payload.entity_id||null;try{await api(`/api/provider-records/${recordId}/mapping`,{method:"PATCH",body:JSON.stringify(payload)});event.currentTarget.closest("dialog").close();await loadData(true);toast("Bronkoppeling opgeslagen");}catch(error){toast(error.message,"error");}});
+$("#merge-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),source=payload.source_entity_id;delete payload.source_entity_id;try{await api(`/api/entities/${source}/merge`,{method:"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Discovery samengevoegd");}catch(error){toast(error.message,"error");}});
+$("#mapping-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),recordId=payload.record_id;delete payload.record_id;payload.entity_id=payload.entity_id||null;try{await api(`/api/provider-records/${recordId}/mapping`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Bronkoppeling opgeslagen");}catch(error){toast(error.message,"error");}});
 
 $("#topology-edit").addEventListener("click",()=>{state.editingTopology=true;state.selectedNodes.clear();$("#topology-editbar").classList.remove("hidden");$("#topology-edit").classList.add("hidden");renderTopology();});
 $("#finish-edit").addEventListener("click",()=>{state.editingTopology=false;state.selectedNodes.clear();$("#topology-editbar").classList.add("hidden");$("#topology-edit").classList.remove("hidden");renderTopology();});
@@ -613,8 +620,8 @@ $("#add-relation").addEventListener("click",prepareRelationDialog);
 $("#reset-layout").addEventListener("click",async()=>{try{await api("/api/topology/layout/reset",{method:"POST"});await loadData(true);toast("Automatische indeling hersteld");}catch(error){toast(error.message,"error");}});
 $("#topology-undo").addEventListener("click",async()=>{try{const result=await api("/api/topology/undo",{method:"POST"});state.selectedNodes.clear();await loadData(true);toast(`${result.undone} ongedaan gemaakt`);}catch(error){toast(error.message,"error");}});
 $("#topology-node-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),nodeId=payload.node_id;delete payload.node_id;payload.parent_node_id=payload.parent_node_id||null;payload.collapsed=form.elements.collapsed.checked;payload.hidden=false;try{await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Node opgeslagen");}catch(error){toast(error.message,"error");}});
-$("#topology-group-form").addEventListener("submit",async event=>{event.preventDefault();const payload=Object.fromEntries(new FormData(event.currentTarget));payload.node_ids=state.groupSelected?[...state.selectedNodes]:[];try{await api("/api/topology/groups",{method:"POST",body:JSON.stringify(payload)});state.selectedNodes.clear();state.groupSelected=false;event.currentTarget.reset();event.currentTarget.closest("dialog").close();await loadData(true);toast(payload.node_ids.length?"Selectie gegroepeerd":"Groep toegevoegd");}catch(error){toast(error.message,"error");}});
-$("#topology-relation-form").addEventListener("submit",async event=>{event.preventDefault();try{await api("/api/topology/relations",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))});event.currentTarget.reset();event.currentTarget.closest("dialog").close();await loadData(true);toast("Relatie toegevoegd");}catch(error){toast(error.message,"error");}});
+$("#topology-group-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.node_ids=state.groupSelected?[...state.selectedNodes]:[];try{await api("/api/topology/groups",{method:"POST",body:JSON.stringify(payload)});state.selectedNodes.clear();state.groupSelected=false;form.reset();form.closest("dialog").close();await loadData(true);toast(payload.node_ids.length?"Selectie gegroepeerd":"Groep toegevoegd");}catch(error){toast(error.message,"error");}});
+$("#topology-relation-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget;try{await api("/api/topology/relations",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();form.closest("dialog").close();await loadData(true);toast("Relatie toegevoegd");}catch(error){toast(error.message,"error");}});
 $("#delete-topology-group").addEventListener("click",async()=>{const form=$("#topology-node-form"),node=state.data.topology.nodes.find(item=>item.id===form.elements.node_id.value);if(node&&confirm(`${node.label} verwijderen? Kinderen worden uit de groep gehaald.`)){try{await api(`/api/topology/groups/${encodeURIComponent(node.id)}?confirm=${encodeURIComponent(node.label)}`,{method:"DELETE"});form.closest("dialog").close();state.selectedNodes.delete(node.id);await loadData(true);toast("Groep verwijderd");}catch(error){toast(error.message,"error");}}});
 
 $("#new-dns-record").addEventListener("click",()=>openDns());
@@ -628,10 +635,229 @@ $("#backup-import-button").addEventListener("click",()=>$("#backup-import-file")
 $("#backup-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;const data=new FormData();data.append("file",file);try{const response=await fetch("/api/backups/import",{method:"POST",headers:{"X-CSRF-Token":state.csrf},body:data});const body=await response.json();if(!response.ok)throw new Error(errorMessage(body,response.status));await loadData(true);toast(`Back-up ${body.name} geïmporteerd`);}catch(error){toast(error.message,"error");}finally{event.target.value="";}});
 
 $("#speed-indicator").addEventListener("click",()=>{switchTab("topology");setTimeout(()=>$("#speed-history-card").scrollIntoView({behavior:"smooth",block:"center"}),50);});
-$("#run-speedtest").addEventListener("click",async event=>{event.currentTarget.disabled=true;event.currentTarget.textContent="Test loopt…";try{const result=await api("/api/speedtest/run",{method:"POST"});await loadData(true);toast(result.status==="success"?"Speedtest voltooid":result.error||"Speedtest is al bezig",result.status==="failed"?"error":"success");}catch(error){toast(error.message,"error");}finally{event.currentTarget.disabled=false;event.currentTarget.textContent="Nu testen";}});
+$("#run-speedtest").addEventListener("click",async event=>{const button=event.currentTarget;button.disabled=true;button.textContent="Test loopt…";try{const result=await api("/api/speedtest/run",{method:"POST"});await loadData(true);toast(result.status==="success"?"Speedtest voltooid":result.error||"Speedtest is al bezig",result.status==="failed"?"error":"success");}catch(error){toast(error.message,"error");}finally{button.disabled=false;button.textContent="Nu testen";}});
 $("#speed-settings-button").addEventListener("click",()=>{const settings=state.data.speedtest.settings,form=$("#speed-form");form.elements.enabled.checked=settings.enabled;form.elements.interval_seconds.value=String(settings.interval_seconds);form.elements.server_id.value=settings.server_id||"";form.elements.interface_name.value=settings.interface_name||"";form.elements.duration_seconds.value=settings.duration_seconds;$("#speed-dialog").showModal();});
 $("#speed-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.enabled=form.elements.enabled.checked;payload.interval_seconds=Number(payload.interval_seconds);payload.duration_seconds=Number(payload.duration_seconds);payload.server_id=payload.server_id||null;payload.interface_name=payload.interface_name||null;try{await api("/api/speedtest/settings",{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Speedtestinstellingen opgeslagen");}catch(error){toast(error.message,"error");}});
 
 setInterval(()=>{if(state.data&&!document.hidden)pollSummary();},30000);
 
 initialize();
+
+/* ---------------------------------------------------------------- wizard */
+// Geen server-side wizardstatus: elke stap doet gewone mutaties, dus
+// afbreken laat nooit een halve toestand achter.
+const wizard = {step: 1, providers: ["dhcp-arp", "proxmox", "portainer", "glances", "adguard", "nginx-proxy-manager", "uptime-kuma"], created: 0, merged: 0, ignored: 0};
+
+function wizardShow(step) {
+  wizard.step = Math.min(4, Math.max(1, step));
+  $$(".wizard-panel").forEach(panel => panel.classList.toggle("hidden", Number(panel.dataset.panel) !== wizard.step));
+  $$("#wizard-steps li").forEach(item => {
+    const index = Number(item.dataset.step);
+    item.classList.toggle("active", index === wizard.step);
+    item.classList.toggle("done", index < wizard.step);
+  });
+  $("#wizard-title").textContent = ["Netwerk scannen", "Databronnen koppelen", "Apparaten toewijzen", "Klaar"][wizard.step - 1];
+  $("#wizard-back").disabled = wizard.step === 1;
+  $("#wizard-skip").classList.toggle("hidden", wizard.step === 4);
+  $("#wizard-next").textContent = wizard.step === 4 ? "Sluiten" : "Volgende";
+  if (wizard.step === 2) renderWizardProviders();
+  if (wizard.step === 3) renderAssignList($("#wizard-assign"));
+  if (wizard.step === 4) renderWizardSummary();
+}
+
+async function openWizard() {
+  const info = await api("/api/wizard/info");
+  $("#wizard-subnets").value = info.suggested_subnet || "";
+  $("#wizard-subnet-hint").textContent = `Toegestaan volgens PATCH_TRUSTED_SUBNETS: ${info.trusted_subnets.join(", ")}. Maximaal 1024 adressen per subnet.`;
+  Object.assign(wizard, {created: 0, merged: 0, ignored: 0});
+  $("#wizard-scan-results").innerHTML = "";
+  $("#wizard-scan-state").textContent = "";
+  wizardShow(1);
+  $("#wizard-dialog").showModal();
+}
+
+async function closeWizard() {
+  $("#wizard-dialog").close();
+  try { await api("/api/wizard/info", {method:"PATCH", body:JSON.stringify({dismissed:true})}); } catch { /* niet kritiek */ }
+  await loadData(true);
+}
+
+async function runScan() {
+  const subnets = $("#wizard-subnets").value.split(",").map(value => value.trim()).filter(Boolean);
+  const button = $("#wizard-scan");
+  button.disabled = true;
+  $("#wizard-scan-state").textContent = "bezig met scannen…";
+  // Tijdens de scan verschijnen resultaten al: elke vondst wordt los opgeslagen.
+  const ticker = setInterval(() => renderScanResults(), 2000);
+  try {
+    await api("/api/providers/dhcp-arp", {method:"PATCH", body:JSON.stringify({
+      enabled: true, poll_interval_seconds: 300, config: {subnets, scan: subnets.length > 0}, credentials: {},
+    })});
+    const result = await api("/api/providers/dhcp-arp/sync", {method:"POST"});
+    $("#wizard-scan-state").textContent = `${result.records} apparaten gevonden`;
+  } catch (error) {
+    $("#wizard-scan-state").textContent = error.message;
+  } finally {
+    clearInterval(ticker);
+    button.disabled = false;
+    await renderScanResults();
+  }
+}
+
+async function renderScanResults() {
+  try {
+    const rows = await api("/api/discoveries");
+    $("#wizard-scan-results").innerHTML = rows.length ? rows.map(row => `
+      <div class="data-row discovery-row">
+        <div class="data-main"><span class="data-icon">${entityIcon(row.type)}</span><div><strong>${esc(row.name)}</strong><span>${esc(row.vendor || row.mac_address || row.type)}</span></div></div>
+        <div>${esc(row.ip_address || "—")}</div>
+        <div>${esc(row.mac_address || "—")}</div>
+        <div>${esc(row.hostname || "")}</div>
+      </div>`).join("") : `<div class="empty-state">Nog niets gevonden.</div>`;
+  } catch { /* stille refresh */ }
+}
+
+function renderWizardProviders() {
+  $("#wizard-providers").innerHTML = wizard.providers.filter(id => id !== "dhcp-arp").map(id => {
+    const provider = state.data.providers.find(item => item.id === id);
+    if (!provider) return "";
+    const fields = provider.credential_fields || [];
+    return `<article class="provider-card" data-wizard-provider="${esc(id)}">
+      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(provider.type)}</div></div></div></div>
+      <label class="tiny">Basis-URL<input data-wizard-url placeholder="https://host:poort" value="${esc(provider.config.base_url || (provider.config.endpoints?.[0]?.url) || "")}"></label>
+      ${fields.map(field => `<label class="tiny">${esc(field.label)}<input data-wizard-cred="${esc(field.key)}" type="${field.type === "password" ? "password" : "text"}" autocomplete="new-password"></label>`).join("")}
+      <div class="provider-actions">
+        <button class="button" data-wizard-test="${esc(id)}">Test verbinding</button>
+        <button class="button primary" data-wizard-save="${esc(id)}" disabled>Opslaan en ophalen</button>
+      </div>
+      <p class="tiny wizard-result"></p>
+    </article>`;
+  }).join("");
+}
+
+function wizardProviderPayload(card) {
+  const provider = state.data.providers.find(item => item.id === card.dataset.wizardProvider);
+  const url = $("[data-wizard-url]", card).value.trim();
+  const config = {...provider.config};
+  // Glances gebruikt een endpointlijst, de rest één base_url.
+  if (provider.type === "glances") config.endpoints = url ? [{name: "host", url}] : [];
+  else config.base_url = url;
+  const credentials = {};
+  $$("[data-wizard-cred]", card).forEach(input => { if (input.value.trim()) credentials[input.dataset.wizardCred] = input.value; });
+  return {provider, config, credentials};
+}
+
+async function wizardTestProvider(card) {
+  const {provider, config, credentials} = wizardProviderPayload(card);
+  const result = $(".wizard-result", card), save = $("[data-wizard-save]", card);
+  result.textContent = "testen…";
+  result.className = "tiny wizard-result";
+  try {
+    const response = await api(`/api/providers/${provider.id}/test`, {method:"POST", body:JSON.stringify({config, credentials})});
+    result.textContent = response.summary;
+    result.classList.add(response.ok ? "ok" : "error");
+    save.disabled = !response.ok;
+  } catch (error) {
+    result.textContent = error.message;
+    result.classList.add("error");
+  }
+}
+
+async function wizardSaveProvider(card) {
+  const {provider, config, credentials} = wizardProviderPayload(card);
+  const result = $(".wizard-result", card);
+  try {
+    await api(`/api/providers/${provider.id}`, {method:"PATCH", body:JSON.stringify({
+      enabled: true, poll_interval_seconds: provider.poll_interval_seconds, config, credentials,
+    })});
+    const sync = await api(`/api/providers/${provider.id}/sync`, {method:"POST"});
+    result.textContent = `opgeslagen · ${sync.records ?? 0} records opgehaald`;
+    result.className = "tiny wizard-result ok";
+    await loadData(true);
+  } catch (error) {
+    result.textContent = error.message;
+    result.className = "tiny wizard-result error";
+  }
+}
+
+// Bulk-toewijsscherm: ook los bruikbaar vanuit Admin.
+async function renderAssignList(container) {
+  const rows = await api("/api/discoveries");
+  const ports = state.data.physical_devices.flatMap(device => device.ports
+    .filter(port => !port.cable_id)
+    .map(port => ({id: port.id, label: `${device.name} · poort ${port.number}${port.side === "rear" ? " (achter)" : ""}`})));
+  const targets = state.data.entities.filter(entity => entity.origin === "manual");
+  container.innerHTML = rows.length ? rows.map(row => `
+    <div class="assign-row" data-assign-id="${esc(row.id)}">
+      <div class="data-main"><span class="data-icon">${entityIcon(row.type)}</span>
+        <div><strong>${esc(row.name)}</strong><span>${esc(row.vendor || row.type)} · ${esc(row.ip_address || row.mac_address || "")}</span></div></div>
+      <select data-assign-action aria-label="Actie voor ${esc(row.name)}">
+        <option value="later" selected>Later beslissen</option>
+        <option value="promote">Overnemen als device</option>
+        <option value="merge">Samenvoegen met…</option>
+        <option value="ignore">Negeren</option>
+      </select>
+      <select data-assign-target class="hidden" aria-label="Doeldevice">${targets.map(entity => `<option value="${esc(entity.id)}">${esc(entity.name)}</option>`).join("")}</select>
+      <select data-assign-port class="hidden" aria-label="Poort"><option value="">Nog geen poort</option>${ports.map(port => `<option value="${esc(port.id)}">${esc(port.label)}</option>`).join("")}</select>
+    </div>`).join("") : `<div class="empty-state">Geen open discoveries. Scan het netwerk of synchroniseer een databron.</div>`;
+}
+
+async function applyAssignments(container, stateLabel) {
+  const rows = $$("[data-assign-id]", container);
+  let created = 0, merged = 0, ignored = 0, failed = 0;
+  for (const row of rows) {
+    const id = row.dataset.assignId, action = $("[data-assign-action]", row).value;
+    try {
+      if (action === "promote") {
+        await api(`/api/entities/${encodeURIComponent(id)}/promote`, {method:"POST", body:JSON.stringify({})});
+        const portId = $("[data-assign-port]", row).value;
+        if (portId) await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"PUT", body:JSON.stringify({b_entity_id:id})});
+        created += 1;
+      } else if (action === "merge") {
+        await api(`/api/entities/${encodeURIComponent(id)}/merge`, {method:"POST", body:JSON.stringify({target_entity_id:$("[data-assign-target]", row).value})});
+        merged += 1;
+      } else if (action === "ignore") {
+        await api(`/api/entities/${encodeURIComponent(id)}/discovery-state`, {method:"PATCH", body:JSON.stringify({ignored:true, archived:false})});
+        ignored += 1;
+      }
+    } catch (error) { failed += 1; toast(`${id}: ${error.message}`, "error"); }
+  }
+  Object.assign(wizard, {created: wizard.created + created, merged: wizard.merged + merged, ignored: wizard.ignored + ignored});
+  await loadData(true);
+  await renderAssignList(container);
+  if (stateLabel) $(stateLabel).textContent = `${created} overgenomen · ${merged} samengevoegd · ${ignored} genegeerd${failed ? ` · ${failed} mislukt` : ""}`;
+  toast(`${created + merged + ignored} keuze(s) toegepast`);
+}
+
+async function renderWizardSummary() {
+  const open = (await api("/api/discoveries").catch(() => [])).length;
+  $("#wizard-summary").innerHTML = `<div class="mini-item">
+    <strong>${wizard.created} overgenomen · ${wizard.merged} samengevoegd · ${wizard.ignored} genegeerd</strong>
+    <p>${open} discovery(s) staan nog open.<br>Bekijk het resultaat in de <a href="#" data-goto="patch">patchview</a> of de <a href="#" data-goto="topology">topologie</a>.</p></div>`;
+}
+
+$("#wizard-scan").addEventListener("click", runScan);
+$("#wizard-back").addEventListener("click", () => wizardShow(wizard.step - 1));
+$("#wizard-skip").addEventListener("click", () => wizardShow(wizard.step + 1));
+$("#wizard-next").addEventListener("click", () => wizard.step === 4 ? closeWizard() : wizardShow(wizard.step + 1));
+$("#wizard-close").addEventListener("click", closeWizard);
+$("#wizard-apply").addEventListener("click", () => applyAssignments($("#wizard-assign"), "#wizard-apply-state"));
+$("#open-wizard").addEventListener("click", openWizard);
+$("#open-assign").addEventListener("click", async () => { await renderAssignList($("#assign-standalone")); $("#assign-dialog").showModal(); });
+$("#assign-apply").addEventListener("click", () => applyAssignments($("#assign-standalone"), null));
+
+$("#wizard-dialog").addEventListener("click", event => {
+  const test = event.target.closest("[data-wizard-test]"); if (test) wizardTestProvider(test.closest("[data-wizard-provider]"));
+  const save = event.target.closest("[data-wizard-save]"); if (save) wizardSaveProvider(save.closest("[data-wizard-provider]"));
+  const goto = event.target.closest("[data-goto]");
+  if (goto) { event.preventDefault(); closeWizard().then(() => switchTab(goto.dataset.goto)); }
+});
+
+// Toon/verberg de vervolgkeuzes bij "samenvoegen" en "overnemen".
+document.addEventListener("change", event => {
+  const select = event.target.closest("[data-assign-action]");
+  if (!select) return;
+  const row = select.closest("[data-assign-id]");
+  $("[data-assign-target]", row).classList.toggle("hidden", select.value !== "merge");
+  $("[data-assign-port]", row).classList.toggle("hidden", select.value !== "promote");
+});

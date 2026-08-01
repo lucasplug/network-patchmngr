@@ -556,3 +556,145 @@ class ProviderManager:
             )
             count += 1
         return count
+
+    # --- Testverbinding ------------------------------------------------
+    # Read-only proefcall per provider: zegt vóór opslaan of de gegevens
+    # kloppen en wat er gevonden zou worden. Slaat niets op.
+
+    async def test_one(
+        self, provider_id: str, config: dict[str, Any], credentials: dict[str, str | None]
+    ) -> dict[str, Any]:
+        provider = self.database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
+        if not provider:
+            raise ValueError("Onbekende provider")
+        merged = dict(self.secrets.get(provider_id))
+        merged.update({key: value.strip() for key, value in credentials.items() if value and value.strip()})
+        handler = getattr(self, f"_test_{provider['type']}", None)
+        if handler is None:
+            return {"ok": False, "summary": "Deze provider heeft geen testverbinding"}
+        try:
+            return {"ok": True, "summary": await handler(config, merged)}
+        except httpx.HTTPStatusError as exc:
+            hint = " (controleer inloggegevens)" if exc.response.status_code in (401, 403) else ""
+            return {"ok": False, "summary": f"HTTP {exc.response.status_code}{hint}"}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            return {"ok": False, "summary": str(exc)[:200] or exc.__class__.__name__}
+
+    async def _test_dhcp_arp(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        arp_path = Path("/proc/net/arp")
+        entries = 0
+        if arp_path.exists():
+            entries = sum(1 for line in arp_path.read_text().splitlines()[1:] if normalize_mac(line.split()[3:4] and line.split()[3]))
+        subnets = [str(value) for value in config.get("subnets", [])]
+        for value in subnets:
+            network = ipaddress.ip_network(value, strict=False)
+            if not self._network_is_trusted(network):
+                raise ValueError(f"Subnet {network} valt buiten PATCH_TRUSTED_SUBNETS")
+            if network.num_addresses > 1024:
+                raise ValueError(f"Subnet {network} bevat meer dan 1024 adressen")
+        scope = f", scan over {', '.join(subnets)}" if subnets and config.get("scan") else ""
+        return f"ARP-tabel: {entries} buren{scope}"
+
+    async def _test_uptime_kuma(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        base_url = str(config.get("base_url", "")).rstrip("/")
+        slug = config.get("status_page_slug")
+        if not base_url or not slug:
+            raise ValueError("Base URL en statuspagina-slug zijn verplicht")
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(f"{base_url}/api/status-page/{slug}")
+            response.raise_for_status()
+            page = response.json()
+        monitors = sum(len(group.get("monitorList", []) or []) for group in page.get("publicGroupList", []))
+        return f"{monitors} monitor(s) op statuspagina '{slug}'"
+
+    async def _test_glances(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        endpoints = config.get("endpoints", []) or []
+        if not endpoints:
+            raise ValueError("Geen endpoints geconfigureerd")
+        auth = None
+        if credentials.get("username") and credentials.get("password"):
+            auth = (credentials["username"], credentials["password"])
+        found: list[str] = []
+        async with httpx.AsyncClient(timeout=15, auth=auth) as client:
+            for endpoint in endpoints:
+                base_url = str(endpoint.get("url", "")).rstrip("/")
+                if not base_url:
+                    continue
+                response = await client.get(f"{base_url}/system")
+                response.raise_for_status()
+                containers = await client.get(f"{base_url}/containers")
+                count = len(containers.json()) if containers.status_code == 200 else 0
+                found.append(f"{response.json().get('hostname') or base_url} ({count} container(s))")
+        return "Hosts: " + ", ".join(found) if found else "Geen bruikbare endpoints"
+
+    async def _test_adguard(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        base_url = str(config.get("base_url", "")).rstrip("/")
+        if not base_url or not credentials.get("username") or not credentials.get("password"):
+            raise ValueError("URL, gebruikersnaam of wachtwoord ontbreekt")
+        auth = (credentials["username"], credentials["password"])
+        async with httpx.AsyncClient(timeout=20, verify=bool(config.get("verify_tls", True)), auth=auth) as client:
+            clients = await client.get(f"{base_url}/control/clients")
+            clients.raise_for_status()
+            payload = clients.json()
+            rewrites = await client.get(f"{base_url}/control/rewrite/list")
+            rewrites.raise_for_status()
+        total = len(payload.get("clients", []) or []) + len(payload.get("auto_clients", []) or [])
+        return f"{total} client(s), {len(rewrites.json())} DNS-rewrite(s)"
+
+    async def _test_nginx_proxy_manager(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        base_url = str(config.get("base_url", "")).rstrip("/")
+        if not base_url:
+            raise ValueError("Nginx Proxy Manager URL ontbreekt")
+        async with httpx.AsyncClient(timeout=20, verify=bool(config.get("verify_tls", True))) as client:
+            token = credentials.get("token")
+            if not token:
+                identity, secret = credentials.get("identity"), credentials.get("secret")
+                if not identity or not secret:
+                    raise ValueError("Token of gebruikersnaam/wachtwoord ontbreekt")
+                login = await client.post(f"{base_url}/api/tokens", json={"identity": identity, "secret": secret})
+                login.raise_for_status()
+                token = login.json().get("token")
+            response = await client.get(
+                f"{base_url}/api/nginx/proxy-hosts", headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+        return f"{len(response.json())} proxyhost(s)"
+
+    async def _test_portainer(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        base_url = str(config.get("base_url", "")).rstrip("/")
+        token = credentials.get("api_key")
+        if not base_url or not token:
+            raise ValueError("Portainer URL of API-key ontbreekt")
+        async with httpx.AsyncClient(
+            timeout=20, verify=bool(config.get("verify_tls", True)), headers={"X-API-Key": token}
+        ) as client:
+            response = await client.get(f"{base_url}/api/endpoints")
+            response.raise_for_status()
+            endpoints = response.json()
+            containers = 0
+            for endpoint in endpoints:
+                listing = await client.get(
+                    f"{base_url}/api/endpoints/{endpoint['Id']}/docker/containers/json?all=1"
+                )
+                if listing.status_code == 200:
+                    containers += len(listing.json())
+        return f"{len(endpoints)} endpoint(s), {containers} container(s)"
+
+    async def _test_proxmox(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
+        base_url = str(config.get("base_url", "")).rstrip("/")
+        user, token_name = config.get("user"), config.get("token_name")
+        secret = credentials.get("token_secret")
+        if not all((base_url, user, token_name, secret)):
+            raise ValueError("URL, gebruiker, tokennaam of tokengeheim ontbreekt")
+        headers = {"Authorization": f"PVEAPIToken={user}!{token_name}={secret}"}
+        async with httpx.AsyncClient(
+            timeout=20, verify=bool(config.get("verify_tls", True)), headers=headers
+        ) as client:
+            response = await client.get(f"{base_url}/api2/json/cluster/resources")
+            response.raise_for_status()
+        resources = response.json().get("data", [])
+        kinds = {"node": 0, "qemu": 0, "lxc": 0}
+        for resource in resources:
+            if resource.get("type") in kinds:
+                kinds[resource["type"]] += 1
+        return f"{kinds['node']} node(s), {kinds['qemu']} VM's, {kinds['lxc']} LXC's"

@@ -87,7 +87,7 @@
       <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".pmbackup,.db,application/zip,application/vnd.sqlite3"></div></div>
       <div class="admin-grid">
         <section class="admin-main">
-          <div class="section-bar"><span>Databronnen</span><span class="muted">read-only adapters</span></div>
+          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
           <div id="providers-grid" class="providers-grid"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
@@ -191,6 +191,58 @@
   <dialog id="merge-dialog" class="modal glass"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
 
   <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
+
+  <dialog id="wizard-dialog" class="modal wide glass wizard">
+    <div class="modal-head">
+      <div><p class="eyebrow">Eerste inrichting</p><h2 id="wizard-title">Netwerk scannen</h2></div>
+      <button type="button" class="icon-button" id="wizard-close" aria-label="Wizard sluiten">×</button>
+    </div>
+    <ol class="wizard-steps" id="wizard-steps">
+      <li data-step="1">Scannen</li><li data-step="2">Databronnen</li><li data-step="3">Toewijzen</li><li data-step="4">Klaar</li>
+    </ol>
+
+    <section class="wizard-panel" data-panel="1">
+      <p class="muted">Zoek apparaten via de ARP-tabel en een ping-sweep. <strong>Alleen apparaten die aan staan en recent verkeer hadden verschijnen hier</strong> — dit is geen volledige inventaris.</p>
+      <label>Te scannen subnet(ten), komma-gescheiden<input id="wizard-subnets" placeholder="192.168.1.0/24"></label>
+      <p class="muted tiny" id="wizard-subnet-hint"></p>
+      <div class="wizard-actions">
+        <button class="button primary" id="wizard-scan">Scan starten</button>
+        <span class="muted tiny" id="wizard-scan-state"></span>
+      </div>
+      <div id="wizard-scan-results" class="data-list compact-list"></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="2">
+      <p class="muted">Vul in wat je gebruikt en test de verbinding vóór opslaan. Elke bron is overslaanbaar.</p>
+      <div id="wizard-providers" class="wizard-providers"></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="3">
+      <p class="muted">Kies per gevonden apparaat wat ermee moet gebeuren. Standaard blijft alles staan op <em>later beslissen</em>; er wordt niets aangemaakt dat je niet aanvinkt.</p>
+      <div id="wizard-assign" class="assign-list"></div>
+      <div class="wizard-actions"><button class="button primary" id="wizard-apply">Keuzes toepassen</button><span class="muted tiny" id="wizard-apply-state"></span></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="4">
+      <div id="wizard-summary" class="mini-list"></div>
+      <p class="muted tiny">Alles wat de wizard doet kan later ook los: <strong>Admin → Nieuwe apparaten toewijzen</strong>.</p>
+    </section>
+
+    <div class="modal-actions wizard-nav">
+      <button type="button" class="button" id="wizard-back">Terug</button>
+      <button type="button" class="button" id="wizard-skip">Stap overslaan</button>
+      <button type="button" class="button primary" id="wizard-next">Volgende</button>
+    </div>
+  </dialog>
+
+  <dialog id="assign-dialog" class="modal wide glass">
+    <div class="modal-head">
+      <div><p class="eyebrow">Gevonden apparaten</p><h2>Nieuwe apparaten toewijzen</h2></div>
+      <button type="button" class="icon-button modal-close" aria-label="Sluiten">×</button>
+    </div>
+    <div id="assign-standalone" class="assign-list"></div>
+    <div class="modal-actions"><button type="button" class="button modal-close">Sluiten</button><button type="button" class="button primary" id="assign-apply">Keuzes toepassen</button></div>
+  </dialog>
 
   <div id="topology-tooltip" class="topology-tooltip hidden"></div>
 
