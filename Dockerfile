@@ -9,7 +9,11 @@ FROM alpine:3.21 AS oui-fetcher
 # zodat de app nooit een externe lookup hoeft te doen. Faalt de download, dan
 # blijft het bestand leeg en is vendorherkenning simpelweg uit.
 RUN apk add --no-cache curl \
-    && (curl -fsSL --retry 3 --max-time 120 -o /oui.csv https://standards-oui.ieee.org/oui/oui.csv || : > /oui.csv)
+    && curl -fsSL --retry 3 --max-time 180 -A "network-patchmngr/oui-fetch" \
+         -o /oui.csv https://standards-oui.ieee.org/oui/oui.csv || : > /oui.csv \
+    # Een foutpagina of half bestand is erger dan geen bestand: alleen echte
+    # OUI-data overhouden, anders leegmaken.
+    && grep -qE '^[A-Z-]+,[0-9A-F]{6},' /oui.csv || : > /oui.csv
 
 FROM python:3.13-slim
 

@@ -300,10 +300,13 @@ def _prune_login_attempts() -> None:
 def _maintenance_housekeeping() -> list[dict[str, Any]]:
     """Run blocking SQLite housekeeping outside the event loop."""
     database.clean_sessions()
-    database.clean_observations()
-    database.record_samples(entity_metrics(database))
-    database.prune_history()
     _prune_login_attempts()
+    # Metrics parsen is het duurste deel; alleen doen als er echt een nieuw
+    # meetpunt aan de beurt is (elke 5 minuten, niet elke 30 seconden).
+    if database.sample_slot_due():
+        database.clean_observations()
+        database.record_samples(entity_metrics(database))
+        database.prune_history()
     with database.transaction() as connection:
         connection.execute(
             """UPDATE entities SET status='unknown',status_updated_at=?

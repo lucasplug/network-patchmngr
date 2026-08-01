@@ -77,8 +77,6 @@ def test_retention_drops_old_samples_days_and_audit_rows() -> None:
         connection.execute(
             "INSERT INTO entity_days(entity_id,day,samples_total,samples_up) VALUES(?,?,10,10)", (entity_id, old_day)
         )
-    for index in range(db_module.AUDIT_RETENTION_ROWS + 25):
-        pass
     with database.transaction() as connection:
         connection.executemany(
             "INSERT INTO audit_log(id,actor_user_id,action,target_type,target_id,details_json,created_at) VALUES(?,NULL,'test','x',NULL,'{}',?)",
@@ -122,3 +120,22 @@ def test_history_stays_within_the_documented_budget() -> None:
     expected_max = 40 * 12 * db_module.SAMPLE_RETENTION_HOURS
     assert expected_max == 23040
     assert db_module.DAY_RETENTION_DAYS * 40 == 29200
+
+
+def test_sampling_is_skipped_until_the_next_slot_is_due() -> None:
+    make_entity("Cadans")
+    assert database.sample_slot_due() is True
+    database.record_samples()
+    # Binnen hetzelfde vak hoeft de dure metric-berekening niet te draaien.
+    assert database.sample_slot_due() is False
+    assert database.record_samples() == 0
+
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM entity_samples WHERE sampled_at=?", (database.current_slot(),))
+    assert database.sample_slot_due() is True
+
+
+def test_current_slot_lands_on_a_five_minute_boundary() -> None:
+    slot = database.current_slot()
+    assert int(slot[14:16]) % db_module.SAMPLE_MINUTES == 0
+    assert slot.endswith(":00")

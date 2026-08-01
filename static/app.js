@@ -96,7 +96,9 @@ function stampRefresh() {
 // De 30s-poll haalt alleen statussen op; de volledige bootstrap komt bij het
 // laden en na elke mutatie. Scheelt bij groei de hele inventaris per tick.
 async function pollSummary() {
-  if (!state.data) return;
+  // Niet verversen tijdens een sleepactie of een open dialoog: de DOM eronder
+  // opnieuw opbouwen breekt de handeling waar de gebruiker mee bezig is.
+  if (!state.data || dragPayload || document.querySelector("dialog[open]")) return;
   try {
     const summary = await api("/api/summary");
     const byId = new Map(summary.entities.map(item => [item.id, item]));
@@ -213,7 +215,17 @@ function renderUnpatched() {
 // hetzelfde doen: kabel leggen, verplaatsen of loskoppelen.
 let dragPayload = null;
 
-async function linkEntityToPort(entityId, portId) {
+// Een poort overschrijven gooit de bestaande kabel weg (label, kleur, notities).
+// Bij slepen is dat niet zichtbaar, dus daar vragen we het eerst.
+function confirmOverwrite(portId) {
+  const port = findPort(portId);
+  if (!port || !port.cable_id) return true;
+  const occupant = port.link_kind === "port" ? (port.target_port_label || "een andere poort") : (port.entity_name || "een device");
+  return confirm(`Deze poort is al bezet door ${occupant}${port.cable_label ? ` (kabel ${port.cable_label})` : ""}.\n\nDie kabel wordt losgekoppeld. Doorgaan?`);
+}
+
+async function linkEntityToPort(entityId, portId, {ask = true} = {}) {
+  if (ask && !confirmOverwrite(portId)) return;
   const previous = findPortByEntity(entityId);
   try {
     await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method: "PUT", body: JSON.stringify({b_entity_id: entityId})});
@@ -223,15 +235,28 @@ async function linkEntityToPort(entityId, portId) {
   } catch (error) { toast(error.message, "error"); }
 }
 
+function cablePayload(port) {
+  const shared = {label: port.cable_label, color: port.cable_color, notes: port.cable_notes};
+  return port.link_kind === "entity"
+    ? {...shared, b_entity_id: port.entity_id}
+    : {...shared, b_port_id: port.target_port_id};
+}
+
 async function moveCable(fromPortId, toPortId) {
   const port = findPort(fromPortId);
   if (!port || !port.cable_id) return;
-  const payload = port.link_kind === "entity"
-    ? {b_entity_id: port.entity_id, label: port.cable_label, color: port.cable_color, notes: port.cable_notes}
-    : {b_port_id: port.target_port_id, label: port.cable_label, color: port.cable_color, notes: port.cable_notes};
+  if (!confirmOverwrite(toPortId)) return;
+  const payload = cablePayload(port);
   try {
     await api(`/api/ports/${encodeURIComponent(fromPortId)}/cable`, {method: "DELETE"});
-    await api(`/api/ports/${encodeURIComponent(toPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
+    try {
+      await api(`/api/ports/${encodeURIComponent(toPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
+    } catch (error) {
+      // De oude kabel is al weg; zet hem terug zodat een mislukte verplaatsing
+      // nooit administratie kost.
+      await api(`/api/ports/${encodeURIComponent(fromPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
+      throw error;
+    }
     await loadData(true);
     toast("Kabel verplaatst");
   } catch (error) { toast(error.message, "error"); await loadData(true); }
@@ -1009,7 +1034,7 @@ $("#unpatched-drop").addEventListener("drop", async event => {
 });
 
 // Touch: lang indrukken pakt op, loslaten boven een poort zet neer.
-let touchDrag = null;
+let touchDrag = null, suppressClickUntil = 0;
 document.addEventListener("pointerdown", event => {
   if (event.pointerType === "mouse") return;
   const chip = event.target.closest("[data-drag-entity]");
@@ -1037,6 +1062,9 @@ document.addEventListener("pointerup", async event => {
   $$(".drop-target,.dragging").forEach(item => item.classList.remove("drop-target", "dragging"));
   const payload = dragPayload;
   dragPayload = null;
+  // Na een touch-sleep vuurt de browser alsnog een click; die mag de
+  // poortkiezer niet openen.
+  suppressClickUntil = Date.now() + 600;
   if (!target) return;
   if (payload.kind === "entity") await linkEntityToPort(payload.id, target.dataset.dropPort);
   else if (payload.id !== target.dataset.dropPort) await moveCable(payload.id, target.dataset.dropPort);
@@ -1045,7 +1073,7 @@ document.addEventListener("pointerup", async event => {
 // Zonder muis: klik een device in de zijlijst en kies een poort uit een lijst.
 document.addEventListener("click", event => {
   const chip = event.target.closest("[data-drag-entity]");
-  if (!chip) return;
+  if (!chip || Date.now() < suppressClickUntil) return;
   const entity = state.data.entities.find(item => item.id === chip.dataset.dragEntity);
   const form = $("#quick-link-form");
   form.elements.entity_id.value = chip.dataset.dragEntity;

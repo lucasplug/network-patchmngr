@@ -479,6 +479,20 @@ class Database:
                    )"""
             )
 
+    @staticmethod
+    def current_slot() -> str:
+        now = datetime.now(UTC)
+        return now.replace(minute=now.minute - now.minute % SAMPLE_MINUTES, second=0, microsecond=0).isoformat(timespec="seconds")
+
+    def sample_slot_due(self) -> bool:
+        """Staat er nog niets in het huidige 5-minutenvak?
+
+        De onderhoudslus draait elke 30 seconden; zonder deze check zouden we
+        tien keer per vak alle providerdata parsen om één rij te schrijven.
+        """
+        row = self.fetch_one("SELECT 1 AS n FROM entity_samples WHERE sampled_at=? LIMIT 1", (self.current_slot(),))
+        return row is None
+
     def record_samples(self, metrics: dict[str, dict[str, Any]] | None = None) -> int:
         """Leg één meetpunt per entity vast op het 5-minutenraster.
 
@@ -486,10 +500,8 @@ class Database:
         Zo groeit de historie nooit voorbij het budget in docs/ontwerp-visualisatie.md.
         """
         metrics = metrics or {}
-        now = datetime.now(UTC)
-        slot = now.replace(minute=now.minute - now.minute % SAMPLE_MINUTES, second=0, microsecond=0)
-        stamp = slot.isoformat(timespec="seconds")
-        day = slot.date().isoformat()
+        stamp = self.current_slot()
+        day = stamp[:10]
         written = 0
         with self.transaction() as connection:
             entities = connection.execute("SELECT id,status FROM entities").fetchall()

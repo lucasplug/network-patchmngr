@@ -584,7 +584,10 @@ class ProviderManager:
         arp_path = Path("/proc/net/arp")
         entries = 0
         if arp_path.exists():
-            entries = sum(1 for line in arp_path.read_text().splitlines()[1:] if normalize_mac(line.split()[3:4] and line.split()[3]))
+            for line in arp_path.read_text().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4 and normalize_mac(parts[3]):
+                    entries += 1
         subnets = [str(value) for value in config.get("subnets", [])]
         for value in subnets:
             network = ipaddress.ip_network(value, strict=False)
