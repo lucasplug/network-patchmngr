@@ -19,6 +19,21 @@ def utcnow() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# Harde retentiegrenzen: bewust vast in code, niet instelbaar. Bij ~40 entities
+# blijft dit onder ~6 MB, ongeacht hoe lang de app draait.
+SAMPLE_MINUTES = 5
+SAMPLE_RETENTION_HOURS = 48
+DAY_RETENTION_DAYS = 730
+AUDIT_RETENTION_ROWS = 5000
+
+
+def _as_number(value: Any) -> float | None:
+    try:
+        return round(float(value), 2) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -462,6 +477,67 @@ class Database:
                        FROM observations
                      ) WHERE position > 1
                    )"""
+            )
+
+    def record_samples(self, metrics: dict[str, dict[str, Any]] | None = None) -> int:
+        """Leg één meetpunt per entity vast op het 5-minutenraster.
+
+        Fijne samples leven 48 uur, daarboven blijft alleen het dagtotaal over.
+        Zo groeit de historie nooit voorbij het budget in docs/ontwerp-visualisatie.md.
+        """
+        metrics = metrics or {}
+        now = datetime.now(UTC)
+        slot = now.replace(minute=now.minute - now.minute % SAMPLE_MINUTES, second=0, microsecond=0)
+        stamp = slot.isoformat(timespec="seconds")
+        day = slot.date().isoformat()
+        written = 0
+        with self.transaction() as connection:
+            entities = connection.execute("SELECT id,status FROM entities").fetchall()
+            for entity in entities:
+                entity_metrics = metrics.get(entity["id"]) or {}
+                memory_percent = None
+                used, total = entity_metrics.get("memory_used"), entity_metrics.get("memory_total")
+                if isinstance(used, (int, float)) and isinstance(total, (int, float)) and total:
+                    memory_percent = round(used / total * 100, 1)
+                cursor = connection.execute(
+                    """INSERT INTO entity_samples(entity_id,sampled_at,status,cpu_percent,memory_percent,latency_ms)
+                       VALUES(?,?,?,?,?,?) ON CONFLICT(entity_id,sampled_at) DO NOTHING""",
+                    (entity["id"], stamp, entity["status"], _as_number(entity_metrics.get("cpu_percent")),
+                     memory_percent, _as_number(entity_metrics.get("latency_ms"))),
+                )
+                if not cursor.rowcount:
+                    continue
+                written += 1
+                previous = connection.execute(
+                    """SELECT status FROM entity_samples WHERE entity_id=? AND sampled_at<?
+                       ORDER BY sampled_at DESC LIMIT 1""",
+                    (entity["id"], stamp),
+                ).fetchone()
+                flipped = int(bool(previous) and previous["status"] != entity["status"])
+                connection.execute(
+                    """INSERT INTO entity_days(entity_id,day,samples_total,samples_up,flips,last_change_at)
+                       VALUES(?,?,1,?,?,?)
+                       ON CONFLICT(entity_id,day) DO UPDATE SET
+                         samples_total=samples_total+1,
+                         samples_up=samples_up+excluded.samples_up,
+                         flips=flips+excluded.flips,
+                         last_change_at=CASE WHEN excluded.flips=1 THEN excluded.last_change_at ELSE last_change_at END""",
+                    (entity["id"], day, int(entity["status"] == "up"), flipped, stamp if flipped else None),
+                )
+        return written
+
+    def prune_history(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(hours=SAMPLE_RETENTION_HOURS)).isoformat(timespec="seconds")
+        day_cutoff = (datetime.now(UTC) - timedelta(days=DAY_RETENTION_DAYS)).date().isoformat()
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM entity_samples WHERE sampled_at < ?", (cutoff,))
+            connection.execute("DELETE FROM entity_days WHERE day < ?", (day_cutoff,))
+            # Het auditlog groeit anders onbegrensd; de UI toont er 200.
+            connection.execute(
+                """DELETE FROM audit_log WHERE id IN (
+                     SELECT id FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+                   )""",
+                (AUDIT_RETENTION_ROWS,),
             )
 
     def create_backup(self, backup_dir: Path) -> Path:

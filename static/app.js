@@ -181,7 +181,7 @@ function deviceFace(device) {
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
       ${rears.length ? `<div class="front-label">achterzijde</div><div class="device-front rear">${rears.map(port => portFace(port, device)).join("")}</div>` : ""}
       <div class="port-legend">${device.ports.filter(port => port.cable_id).slice(0, 6).map(port =>
-        `<span class="legend-item"><i style="background:${cableColor(port.cable_color)}"></i>${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""} ${esc(shorten(portLabelFor(port), 22))}</span>`).join("") || `<span class="muted tiny">Nog niets gepatcht — sleep een device op een poort of klik erop.</span>`}</div>
+        `<span class="legend-item"${port.entity_id ? ` data-entity-open="${esc(port.entity_id)}" role="button" tabindex="0"` : ""}><i style="background:${cableColor(port.cable_color)}"></i>${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""} ${esc(shorten(portLabelFor(port), 22))}</span>`).join("") || `<span class="muted tiny">Nog niets gepatcht — sleep een device op een poort of klik erop.</span>`}</div>
     </article>`;
 }
 
@@ -192,7 +192,7 @@ function renderPatch() {
   renderUnpatched();
   const manual=state.data.entities.filter(entity=>entity.origin==="manual");
   $("#manual-entity-count").textContent=`${manual.length} devices`;
-  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(entity.type)} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-entity-edit="${entity.id}">Wijzig</button><button class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
+  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong class="link" data-entity-open="${esc(entity.id)}" role="button" tabindex="0">${esc(entity.name)}</strong><span>${esc(entity.type)} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-entity-edit="${entity.id}">Wijzig</button><button class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
 }
 
 // Zijlijst: devices zonder kabel, sleepbaar naar een poort.
@@ -301,7 +301,8 @@ function renderTopology() {
     if (relation.label) labelMarkup += `<text class="edge-label" x="${(x1+x2)/2+5}" y="${(y1+y2)/2-4}">${esc(shorten(relation.label,24))}</text>`;
   });
   const extent = [...positions.values()].reduce((acc,p) => ({x:Math.max(acc.x,p.x+p.width+50),y:Math.max(acc.y,p.y+p.height+60)}), {x:1200,y:760});
-  svg.setAttribute("viewBox", `0 0 ${extent.x} ${extent.y}`);
+  view.base = [extent.x, extent.y];
+  applyViewBox();
   svg.classList.toggle("editing", state.editingTopology);
   svg.innerHTML = `${edgeMarkup}${labelMarkup}${groupMarkup}${nodeMarkup}`;
   updateSelectionUI();
@@ -347,13 +348,22 @@ function topoNode(node, p) {
   const colors = {up:"#3ddc97",down:"#ff6262",degraded:"#ffb454",unknown:"#667282"};
   const color = colors[node.status] || colors.unknown, metrics=node.metrics||{};
   const cpu=metrics.cpu_percent!==undefined&&metrics.cpu_percent!==null?Math.max(0,Math.min(100,Number(metrics.cpu_percent))):null;
+  const figure = keyFigure(node, metrics);
   return `<g class="topo-node lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}" transform="translate(${p.x} ${p.y})">
     <rect class="topo-rect" width="${p.width}" height="${p.height}" rx="10"/>
     <text class="topo-title" x="12" y="22">${esc(shorten(node.label, 23))}</text>
     <text class="topo-sub" x="12" y="41">${esc(shorten(node.subtitle, 27))}</text>
+    ${figure ? `<text class="topo-figure" x="${p.width-14}" y="41" text-anchor="end">${esc(figure)}</text>` : ""}
     <circle cx="${p.width-14}" cy="14" r="5" fill="${color}"/>
     ${cpu===null?"":`<rect class="metric-track" x="12" y="${p.height-9}" width="${p.width-24}" height="3" rx="2"/><rect class="metric-fill" x="12" y="${p.height-9}" width="${(p.width-24)*cpu/100}" height="3" rx="2"/>`}
   </g>`;
+}
+
+// Eén kerngetal per node: cpu voor machines, respons voor services.
+function keyFigure(node, metrics) {
+  if (metrics.cpu_percent !== undefined && metrics.cpu_percent !== null) return `${Math.round(Number(metrics.cpu_percent))}%`;
+  if (metrics.latency_ms !== undefined && metrics.latency_ms !== null) return `${Math.round(Number(metrics.latency_ms))}ms`;
+  return "";
 }
 
 function shorten(value, length) { value = String(value || ""); return value.length > length ? `${value.slice(0,length-1)}…` : value; }
@@ -1053,3 +1063,130 @@ $("#quick-link-form").addEventListener("submit", async event => {
   form.closest("dialog").close();
   if (portId) await linkEntityToPort(entityId, portId);
 });
+
+/* ------------------------------------------------- entity-drawer met historie */
+function sparkline(values, {height = 26, suffix = ""} = {}) {
+  const points = values.filter(value => value !== null && value !== undefined).map(Number);
+  if (points.length < 2) return `<span class="muted tiny">nog te weinig metingen</span>`;
+  const max = Math.max(...points, 1), min = Math.min(...points, 0), span = max - min || 1;
+  const step = 100 / (points.length - 1);
+  const path = points.map((value, index) => `${index === 0 ? "M" : "L"}${(index * step).toFixed(1)} ${(height - (value - min) / span * height).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 100 ${height}" preserveAspectRatio="none" role="img" aria-label="verloop"><path d="${path}"/></svg>
+    <span class="spark-value">${points[points.length - 1].toFixed(1)}${suffix}</span>`;
+}
+
+function uptimeBar(days) {
+  if (!days.length) return `<span class="muted tiny">nog geen dagen gemeten</span>`;
+  return `<div class="uptime-bar">${days.map(day => {
+    const ratio = day.samples_total ? day.samples_up / day.samples_total : 0;
+    const level = ratio >= 0.999 ? "full" : ratio >= 0.95 ? "high" : ratio > 0 ? "low" : "none";
+    return `<i class="uptime-day ${level}" title="${esc(day.day)}: ${(ratio * 100).toFixed(1)}% up${day.flips ? ` · ${day.flips} wissel(s)` : ""}"></i>`;
+  }).join("")}</div>`;
+}
+
+async function openEntityDrawer(entityId) {
+  const entity = state.data.entities.find(item => item.id === entityId);
+  if (!entity) return;
+  const port = findPortByEntity(entityId);
+  $("#entity-drawer-title").textContent = entity.name;
+  $("#entity-drawer-sub").innerHTML = `${statusDot(entity.status)} ${esc(entity.status)} · ${esc(entity.type)} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}`;
+  $("#entity-drawer-facts").innerHTML = [
+    ["Adres", entity.ip_address || entity.hostname || "—"], ["MAC", entity.mac_address || "—"],
+    ["Vendor", entity.vendor || "—"], ["Laatst gezien", formatTime(entity.last_seen_at)],
+  ].map(([label, value]) => `<div><span class="data-cell-label">${label}</span><br>${esc(value)}</div>`).join("");
+  $("#entity-drawer-cable").innerHTML = port
+    ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
+    : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
+  $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
+  $("#entity-drawer-backdrop").classList.remove("hidden");
+  $("#entity-drawer").classList.add("open");
+  $("#entity-drawer").setAttribute("aria-hidden", "false");
+  try {
+    const history = await api(`/api/entities/${encodeURIComponent(entityId)}/history`);
+    const samples = history.samples;
+    $("#entity-drawer-history").innerHTML = `
+      <div class="history-block"><span class="data-cell-label">Uptime laatste 30 dagen</span>
+        <div class="uptime-head"><b>${history.uptime_percent === null ? "—" : `${history.uptime_percent}%`}</b><span class="muted tiny">${history.flips} statuswissel(s)</span></div>
+        ${uptimeBar(history.days)}</div>
+      <div class="history-block"><span class="data-cell-label">Laatste 48 uur</span>
+        <div class="spark-row"><span>cpu</span>${sparkline(samples.map(item => item.cpu_percent), {suffix:"%"})}</div>
+        <div class="spark-row"><span>mem</span>${sparkline(samples.map(item => item.memory_percent), {suffix:"%"})}</div>
+        <div class="spark-row"><span>ping</span>${sparkline(samples.map(item => item.latency_ms), {suffix:" ms"})}</div>
+      </div>`;
+  } catch (error) {
+    $("#entity-drawer-history").innerHTML = `<span class="muted tiny">${esc(error.message)}</span>`;
+  }
+}
+
+function closeEntityDrawer() {
+  $("#entity-drawer-backdrop").classList.add("hidden");
+  $("#entity-drawer").classList.remove("open");
+  $("#entity-drawer").setAttribute("aria-hidden", "true");
+}
+
+$("#entity-drawer-backdrop").addEventListener("click", closeEntityDrawer);
+$$("#entity-drawer .drawer-close").forEach(button => button.addEventListener("click", closeEntityDrawer));
+document.addEventListener("click", event => {
+  const open = event.target.closest("[data-entity-open]");
+  if (open) openEntityDrawer(open.dataset.entityOpen);
+  const port = event.target.closest("[data-open-port]");
+  if (port) { closeEntityDrawer(); openPort(port.dataset.openPort, port.dataset.openDevice); }
+});
+
+/* --------------------------------------------------------- topologie pan/zoom */
+// Bewust géén graph-library: alleen de viewBox verschuiven/schalen, zodat
+// multiselect, drag→PATCH en de 50-staps undo ongewijzigd blijven werken.
+const view = {x: 0, y: 0, scale: 1, base: null};
+let panning = null;
+
+function applyViewBox() {
+  const svg = $("#topology-canvas");
+  if (!view.base) return;
+  const [width, height] = view.base;
+  svg.setAttribute("viewBox", `${view.x} ${view.y} ${width / view.scale} ${height / view.scale}`);
+  $("#zoom-level").textContent = `${Math.round(view.scale * 100)}%`;
+}
+
+function resetView() {
+  view.x = 0; view.y = 0; view.scale = 1;
+  applyViewBox();
+}
+
+$("#topology-canvas").addEventListener("wheel", event => {
+  if (!view.base) return;
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const next = Math.min(4, Math.max(0.4, view.scale * factor));
+  const rect = event.currentTarget.getBoundingClientRect();
+  const [width, height] = view.base;
+  // Zoom naar de cursor: het punt onder de muis blijft staan.
+  const px = view.x + (event.clientX - rect.left) / rect.width * (width / view.scale);
+  const py = view.y + (event.clientY - rect.top) / rect.height * (height / view.scale);
+  view.x = px - (px - view.x) * (view.scale / next);
+  view.y = py - (py - view.y) * (view.scale / next);
+  view.scale = next;
+  applyViewBox();
+}, {passive: false});
+
+$("#topology-canvas").addEventListener("pointerdown", event => {
+  if (state.editingTopology || event.target.closest("[data-node-id]") || !view.base) return;
+  panning = {x: event.clientX, y: event.clientY, startX: view.x, startY: view.y};
+  $("#topology-canvas").classList.add("panning");
+});
+
+document.addEventListener("pointermove", event => {
+  if (!panning || !view.base) return;
+  const rect = $("#topology-canvas").getBoundingClientRect(), [width, height] = view.base;
+  view.x = panning.startX - (event.clientX - panning.x) / rect.width * (width / view.scale);
+  view.y = panning.startY - (event.clientY - panning.y) / rect.height * (height / view.scale);
+  applyViewBox();
+});
+
+document.addEventListener("pointerup", () => {
+  panning = null;
+  $("#topology-canvas").classList.remove("panning");
+});
+
+$("#zoom-in").addEventListener("click", () => { view.scale = Math.min(4, view.scale * 1.25); applyViewBox(); });
+$("#zoom-out").addEventListener("click", () => { view.scale = Math.max(0.4, view.scale / 1.25); applyViewBox(); });
+$("#zoom-reset").addEventListener("click", resetView);

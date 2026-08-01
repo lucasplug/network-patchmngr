@@ -82,7 +82,7 @@
       </div>
       <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button class="button hidden" id="group-selection">Selectie groeperen</button><button class="button" id="topology-undo">↶ Ongedaan</button><button class="button" id="add-group">+ Groep</button><button class="button" id="add-relation">+ Relatie</button><button class="button" id="reset-layout">Auto-indeling</button><button class="button primary" id="finish-edit">Klaar</button></div></div>
       <div class="topology-card glass">
-        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><span class="muted">sleepvrij · automatisch ingedeeld</span></div>
+        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><div class="zoom-controls"><button class="icon-button" id="zoom-out" aria-label="Uitzoomen">−</button><span id="zoom-level" class="muted">100%</span><button class="icon-button" id="zoom-in" aria-label="Inzoomen">+</button><button class="button micro" id="zoom-reset">Passend</button></div></div>
         <div class="topology-scroll"><svg id="topology-canvas" viewBox="0 0 1200 760" role="img" aria-label="Netwerktopologie"></svg></div>
       </div>
       <div class="speed-history-card glass" id="speed-history-card">
@@ -200,6 +200,19 @@
   <dialog id="merge-dialog" class="modal glass"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
 
   <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
+
+  <div id="entity-drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="entity-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div><p class="eyebrow">Device</p><h2 id="entity-drawer-title">Device</h2><p class="muted tiny" id="entity-drawer-sub"></p></div>
+      <button class="icon-button drawer-close" aria-label="Sluiten">×</button>
+    </div>
+    <div class="drawer-body">
+      <div class="fact-grid" id="entity-drawer-facts"></div>
+      <div id="entity-drawer-cable"></div>
+      <div id="entity-drawer-history"></div>
+    </div>
+  </aside>
 
   <dialog id="quick-link-dialog" class="modal glass">
     <form id="quick-link-form" class="stack">

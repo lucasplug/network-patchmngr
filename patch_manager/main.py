@@ -301,6 +301,8 @@ def _maintenance_housekeeping() -> list[dict[str, Any]]:
     """Run blocking SQLite housekeeping outside the event loop."""
     database.clean_sessions()
     database.clean_observations()
+    database.record_samples(entity_metrics(database))
+    database.prune_history()
     _prune_login_attempts()
     with database.transaction() as connection:
         connection.execute(
@@ -594,6 +596,28 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
                 "SELECT id,started_at FROM speedtest_runs WHERE status='running' ORDER BY started_at DESC LIMIT 1"
             ),
         },
+    }
+
+
+@app.get("/api/entities/{entity_id}/history")
+def entity_history(entity_id: str, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Device niet gevonden")
+    days = database.fetch_all(
+        "SELECT * FROM entity_days WHERE entity_id=? ORDER BY day DESC LIMIT 30", (entity_id,)
+    )
+    samples = database.fetch_all(
+        """SELECT sampled_at,status,cpu_percent,memory_percent,latency_ms FROM entity_samples
+           WHERE entity_id=? ORDER BY sampled_at DESC LIMIT 576""",
+        (entity_id,),
+    )
+    total = sum(row["samples_total"] for row in days)
+    up = sum(row["samples_up"] for row in days)
+    return {
+        "days": list(reversed(days)),
+        "samples": list(reversed(samples)),
+        "uptime_percent": round(up / total * 100, 1) if total else None,
+        "flips": sum(row["flips"] for row in days),
     }
 
 
