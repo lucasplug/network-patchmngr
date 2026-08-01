@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from .db import Database, utcnow
+from .oui import vendor_for_mac
 from .secret_store import SecretStore
 
 
@@ -117,6 +118,7 @@ class ProviderManager:
     ) -> str:
         now = utcnow()
         mac_address = normalize_mac(mac_address)
+        vendor = vendor_for_mac(mac_address)
         existing_record = self.database.fetch_one(
             "SELECT entity_id FROM provider_records WHERE provider_id=? AND external_id=?",
             (provider_id, external_id),
@@ -153,8 +155,8 @@ class ProviderManager:
                         """UPDATE entities SET name=?,type=?,status=?,status_updated_at=?,
                            ip_address=COALESCE(?,ip_address),mac_address=COALESCE(?,mac_address),
                            hostname=COALESCE(?,hostname),parent_id=COALESCE(?,parent_id),
-                           last_seen_at=?,updated_at=? WHERE id=?""",
-                        (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, now, now, entity_id),
+                           vendor=COALESCE(?,vendor),last_seen_at=?,updated_at=? WHERE id=?""",
+                        (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, vendor, now, now, entity_id),
                     )
             else:
                 self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
@@ -169,9 +171,9 @@ class ProviderManager:
                 connection.execute(
                     """INSERT INTO entities
                        (id,name,type,origin,status,status_updated_at,ip_address,mac_address,hostname,parent_id,
-                        first_seen_at,last_seen_at,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (entity_id, name, entity_type, "discovered", status, now, ip_address, mac_address, hostname, parent_id, now, now, now, now),
+                        vendor,first_seen_at,last_seen_at,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (entity_id, name, entity_type, "discovered", status, now, ip_address, mac_address, hostname, parent_id, vendor, now, now, now, now),
                 )
 
         with self.database.transaction() as connection:

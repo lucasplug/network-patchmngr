@@ -120,8 +120,10 @@
       <input type="hidden" name="port_id">
       <div class="port-identity"><span id="drawer-device"></span><span id="drawer-speed" class="pill"></span></div>
       <label>Gekoppeld device<select name="entity_id"><option value="">Niet aangesloten</option></select></label>
+      <label>…of doorverbonden naar poort<select name="b_port_id"><option value="">Geen doorverbinding</option></select></label>
       <div class="field-row"><label>Kabellabel<input name="cable_label" placeholder="bijv. C-014"></label><label>Kleur<input name="cable_color" placeholder="bijv. blauw"></label></div>
       <label>Notities<textarea name="notes" rows="4" placeholder="Wandcontactdoos, bestemming, bijzonderheden…"></textarea></label>
+      <div id="drawer-trace" class="drawer-trace"></div>
       <div class="drawer-actions"><button type="button" class="button danger hidden" id="disconnect-port">Loskoppelen</button><button type="submit" class="button primary">Opslaan</button></div>
     </form>
   </aside>

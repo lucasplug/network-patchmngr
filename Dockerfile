@@ -4,12 +4,20 @@ RUN apk add --no-cache git \
 WORKDIR /src
 RUN go build -trimpath -ldflags="-s -w" -o /out/librespeed-cli .
 
+FROM alpine:3.21 AS oui-fetcher
+# Lokale vendorherkenning: het IEEE-bestand wordt één keer bij de build gehaald,
+# zodat de app nooit een externe lookup hoeft te doen. Faalt de download, dan
+# blijft het bestand leeg en is vendorherkenning simpelweg uit.
+RUN apk add --no-cache curl \
+    && (curl -fsSL --retry 3 --max-time 120 -o /oui.csv https://standards-oui.ieee.org/oui/oui.csv || : > /oui.csv)
+
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATCH_DATA_DIR=/data \
-    PATCH_BACKUP_DIR=/backups
+    PATCH_BACKUP_DIR=/backups \
+    PATCH_OUI_FILE=/app/oui.csv
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping libcap2-bin \
@@ -26,6 +34,7 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir --upgrade pip==26.2 \
     && pip install --no-cache-dir -r requirements.txt
 
+COPY --from=oui-fetcher /oui.csv ./oui.csv
 COPY patch_manager ./patch_manager
 COPY static ./static
 

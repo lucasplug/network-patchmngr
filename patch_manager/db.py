@@ -59,10 +59,12 @@ CREATE TABLE IF NOT EXISTS ports (
   id TEXT PRIMARY KEY,
   physical_device_id TEXT NOT NULL REFERENCES physical_devices(id) ON DELETE CASCADE,
   number INTEGER NOT NULL,
+  side TEXT NOT NULL DEFAULT 'front' CHECK(side IN ('front','rear')),
+  peer_port_id TEXT REFERENCES ports(id) ON DELETE SET NULL,
   label TEXT NOT NULL DEFAULT '',
   speed_mbps INTEGER,
   notes TEXT NOT NULL DEFAULT '',
-  UNIQUE(physical_device_id, number)
+  UNIQUE(physical_device_id, number, side)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -76,6 +78,7 @@ CREATE TABLE IF NOT EXISTS entities (
   mac_address TEXT,
   hostname TEXT,
   parent_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  vendor TEXT,
   ignored INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
   notes TEXT NOT NULL DEFAULT '',
@@ -88,14 +91,44 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE UNIQUE INDEX IF NOT EXISTS entities_mac_unique
 ON entities(lower(mac_address)) WHERE mac_address IS NOT NULL AND mac_address != '';
 
-CREATE TABLE IF NOT EXISTS port_assignments (
-  port_id TEXT PRIMARY KEY REFERENCES ports(id) ON DELETE CASCADE,
-  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
-  cable_label TEXT NOT NULL DEFAULT '',
-  cable_color TEXT NOT NULL DEFAULT '',
+CREATE TABLE IF NOT EXISTS cables (
+  id TEXT PRIMARY KEY,
+  a_port_id TEXT NOT NULL REFERENCES ports(id) ON DELETE CASCADE,
+  b_port_id TEXT REFERENCES ports(id) ON DELETE CASCADE,
+  b_entity_id TEXT REFERENCES entities(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
+  color TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
-  updated_by TEXT REFERENCES users(id)
+  updated_by TEXT REFERENCES users(id),
+  CHECK ((b_port_id IS NULL) != (b_entity_id IS NULL)),
+  CHECK (b_port_id IS NULL OR a_port_id != b_port_id)
+);
+
+-- Eén kabel per poort en (bewust) één kabel per entity; "poort bezet?" moet in
+-- code beide poortkolommen controleren, deze indexen zijn het vangnet per kolom.
+CREATE UNIQUE INDEX IF NOT EXISTS cables_a_port ON cables(a_port_id);
+CREATE UNIQUE INDEX IF NOT EXISTS cables_b_port ON cables(b_port_id) WHERE b_port_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cables_b_entity ON cables(b_entity_id) WHERE b_entity_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS entity_samples (
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  sampled_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  cpu_percent REAL,
+  memory_percent REAL,
+  latency_ms REAL,
+  PRIMARY KEY(entity_id, sampled_at)
+);
+
+CREATE TABLE IF NOT EXISTS entity_days (
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  day TEXT NOT NULL,
+  samples_total INTEGER NOT NULL DEFAULT 0,
+  samples_up INTEGER NOT NULL DEFAULT 0,
+  flips INTEGER NOT NULL DEFAULT 0,
+  last_change_at TEXT,
+  PRIMARY KEY(entity_id, day)
 );
 
 CREATE TABLE IF NOT EXISTS providers (
@@ -324,11 +357,6 @@ class Database:
     def initialize(self) -> None:
         with self.transaction() as connection:
             connection.executescript(SCHEMA)
-            entity_columns = {row[1] for row in connection.execute("PRAGMA table_info(entities)").fetchall()}
-            if "ignored" not in entity_columns:
-                connection.execute("ALTER TABLE entities ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0")
-            if "archived" not in entity_columns:
-                connection.execute("ALTER TABLE entities ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             inventory_seeded = connection.execute(
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()

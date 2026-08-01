@@ -26,7 +26,15 @@ from .secret_store import SecretStore
 from .security import hash_password, new_token, token_digest, verify_password
 from .settings import get_settings
 from .speedtest import SpeedtestManager
-from .topology import capture_topology, create_group, create_relation, topology_payload, undo_topology
+from .topology import (
+    capture_topology,
+    create_group,
+    create_relation,
+    entity_metrics,
+    topology_payload,
+    trace_from_port,
+    undo_topology,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -82,10 +90,21 @@ class PhysicalDeviceInput(BaseModel):
     ports: int = Field(default=1, ge=1, le=96)
 
 
-class PortAssignmentInput(BaseModel):
-    entity_id: str
-    cable_label: str = Field(default="", max_length=100)
-    cable_color: str = Field(default="", max_length=40)
+class CableInput(BaseModel):
+    a_port_id: str
+    b_port_id: str | None = None
+    b_entity_id: str | None = None
+    label: str = Field(default="", max_length=100)
+    color: str = Field(default="", max_length=40)
+    notes: str = Field(default="", max_length=2000)
+
+
+class PortCableInput(BaseModel):
+    """Zelfde als CableInput, maar de a-poort komt uit het pad."""
+    b_port_id: str | None = None
+    b_entity_id: str | None = None
+    label: str = Field(default="", max_length=100)
+    color: str = Field(default="", max_length=40)
     notes: str = Field(default="", max_length=2000)
 
 
@@ -416,20 +435,82 @@ def serialize_provider(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def load_cable_context() -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    ports = {row["id"]: row for row in database.fetch_all("SELECT * FROM ports")}
+    cables = database.fetch_all("SELECT * FROM cables")
+    by_port: dict[str, dict[str, Any]] = {}
+    for cable in cables:
+        by_port[cable["a_port_id"]] = cable
+        if cable["b_port_id"]:
+            by_port[cable["b_port_id"]] = cable
+    return ports, cables, by_port
+
+
+def port_display_name(port: dict[str, Any], devices_by_id: dict[str, dict[str, Any]]) -> str:
+    device = devices_by_id.get(port["physical_device_id"], {})
+    side = " (achter)" if port["side"] == "rear" else ""
+    return f"{device.get('name', '?')} · poort {port['number']}{side}"
+
+
 def nested_physical_devices() -> list[dict[str, Any]]:
     devices = database.fetch_all("SELECT * FROM physical_devices ORDER BY position,name")
-    ports = database.fetch_all(
-        """SELECT p.*,pa.entity_id,pa.cable_label,pa.cable_color,pa.notes AS assignment_notes,
-                  e.name AS entity_name,e.type AS entity_type,e.status AS entity_status,e.ip_address,e.hostname
-           FROM ports p LEFT JOIN port_assignments pa ON pa.port_id=p.id
-           LEFT JOIN entities e ON e.id=pa.entity_id ORDER BY p.physical_device_id,p.number"""
-    )
+    devices_by_id = {device["id"]: device for device in devices}
+    ports, _cables, by_port = load_cable_context()
+    entities = {
+        row["id"]: row
+        for row in database.fetch_all("SELECT id,name,type,status,ip_address,hostname FROM entities")
+    }
     by_device: dict[str, list[dict[str, Any]]] = {}
-    for port in ports:
+    for port in sorted(ports.values(), key=lambda item: (item["physical_device_id"], item["side"], item["number"])):
+        cable = by_port.get(port["id"])
+        port["cable_id"] = cable["id"] if cable else None
+        port["cable_label"] = cable["label"] if cable else ""
+        port["cable_color"] = cable["color"] if cable else ""
+        port["cable_notes"] = cable["notes"] if cable else ""
+        port["link_kind"] = None
+        port["target_port_id"] = None
+        port["target_port_label"] = None
+        entity = None
+        if cable:
+            if cable["b_entity_id"] and cable["a_port_id"] == port["id"]:
+                port["link_kind"] = "entity"
+                entity = entities.get(cable["b_entity_id"])
+            else:
+                port["link_kind"] = "port"
+                other = cable["b_port_id"] if cable["a_port_id"] == port["id"] else cable["a_port_id"]
+                port["target_port_id"] = other
+                if other in ports:
+                    port["target_port_label"] = port_display_name(ports[other], devices_by_id)
+                _, final_entity_id = trace_from_port(port["id"], ports, by_port)
+                entity = entities.get(final_entity_id) if final_entity_id else None
+        port["entity_id"] = entity["id"] if entity else None
+        port["entity_name"] = entity["name"] if entity else None
+        port["entity_type"] = entity["type"] if entity else None
+        port["entity_status"] = entity["status"] if entity else None
+        port["ip_address"] = entity["ip_address"] if entity else None
+        port["hostname"] = entity["hostname"] if entity else None
         by_device.setdefault(port["physical_device_id"], []).append(port)
     for device in devices:
         device["ports"] = by_device.get(device["id"], [])
     return devices
+
+
+def inventory_counts() -> dict[str, Any]:
+    linked = {
+        row["b_entity_id"]
+        for row in database.fetch_all("SELECT b_entity_id FROM cables WHERE b_entity_id IS NOT NULL")
+    }
+    open_discoveries = database.fetch_all(
+        "SELECT id FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"
+    )
+    return {
+        "ports": database.fetch_one("SELECT COUNT(*) AS n FROM ports WHERE side='front'")["n"],
+        "patched": database.fetch_one("SELECT COUNT(*) AS n FROM cables")["n"],
+        "up": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='up'")["n"],
+        "down": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='down'")["n"],
+        "unlinked": sum(1 for row in open_discoveries if row["id"] not in linked),
+        "conflicts": database.fetch_one("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'")["n"],
+    }
 
 
 @app.get("/api/bootstrap")
@@ -441,15 +522,7 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
            LEFT JOIN entities e ON e.id=c.entity_id LEFT JOIN providers p ON p.id=c.provider_id
            ORDER BY c.status,c.created_at DESC"""
     )
-    assigned = {row["entity_id"] for row in database.fetch_all("SELECT entity_id FROM port_assignments")}
-    counts = {
-        "ports": database.fetch_one("SELECT COUNT(*) AS n FROM ports")["n"],
-        "patched": database.fetch_one("SELECT COUNT(*) AS n FROM port_assignments")["n"],
-        "up": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='up'")["n"],
-        "down": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='down'")["n"],
-        "unlinked": sum(1 for entity in entities if entity["origin"] == "discovered" and not entity["ignored"] and not entity["archived"] and entity["id"] not in assigned),
-        "conflicts": sum(1 for conflict in conflicts if conflict["status"] == "open"),
-    }
+    counts = inventory_counts()
     return {
         "site": {"title": app_title(), "timezone": "Europe/Amsterdam"},
         "counts": counts,
@@ -482,6 +555,29 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
             """SELECT a.*,u.username FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id
                ORDER BY a.created_at DESC LIMIT 200"""
         ),
+    }
+
+
+@app.get("/api/summary")
+def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    """Licht poll-endpoint: statussen en tellers, geen volledige inventaris."""
+    return {
+        "counts": inventory_counts(),
+        "entities": database.fetch_all(
+            "SELECT id,status,status_updated_at,last_seen_at FROM entities"
+        ),
+        "metrics": entity_metrics(database),
+        "providers": database.fetch_all(
+            "SELECT id,enabled,last_run_at,last_success_at,last_error FROM providers"
+        ),
+        "speedtest": {
+            "latest": database.fetch_one(
+                "SELECT * FROM speedtest_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1"
+            ),
+            "running": database.fetch_one(
+                "SELECT id,started_at FROM speedtest_runs WHERE status='running' ORDER BY started_at DESC LIMIT 1"
+            ),
+        },
     }
 
 
@@ -547,9 +643,9 @@ def merge_entity(entity_id: str, payload: EntityMergeInput, auth: AuthContext = 
         raise HTTPException(404, "Bron- of doeldevice niet gevonden")
     if source["origin"] != "discovered" or source["id"] == target["id"]:
         raise HTTPException(409, "Alleen een discovery kan in een ander device worden samengevoegd")
-    source_assignment = database.fetch_one("SELECT port_id FROM port_assignments WHERE entity_id=?", (entity_id,))
-    target_assignment = database.fetch_one("SELECT port_id FROM port_assignments WHERE entity_id=?", (target["id"],))
-    if source_assignment and target_assignment:
+    source_cable = database.fetch_one("SELECT id FROM cables WHERE b_entity_id=?", (entity_id,))
+    target_cable = database.fetch_one("SELECT id FROM cables WHERE b_entity_id=?", (target["id"],))
+    if source_cable and target_cable:
         raise HTTPException(409, "Beide devices hebben een fysieke poort; koppel er eerst één los")
     source_node = f"entity:{entity_id}"
     target_node = f"entity:{target['id']}"
@@ -558,8 +654,8 @@ def merge_entity(entity_id: str, payload: EntityMergeInput, auth: AuthContext = 
         (source_node, source_node),
     )
     with database.transaction() as connection:
-        if source_assignment:
-            connection.execute("UPDATE port_assignments SET entity_id=? WHERE entity_id=?", (target["id"], entity_id))
+        if source_cable:
+            connection.execute("UPDATE cables SET b_entity_id=? WHERE b_entity_id=?", (target["id"], entity_id))
         for table in ("provider_records", "observations", "conflicts"):
             connection.execute(f"UPDATE {table} SET entity_id=? WHERE entity_id=?", (target["id"], entity_id))
         connection.execute("UPDATE entities SET parent_id=? WHERE parent_id=?", (target["id"], entity_id))
@@ -589,7 +685,7 @@ def entity_deletion_impact(entity_id: str) -> dict[str, Any]:
         raise HTTPException(404, "Device niet gevonden")
     counts = database.fetch_one(
         """SELECT
-             (SELECT COUNT(*) FROM port_assignments WHERE entity_id=?) AS port_assignments,
+             (SELECT COUNT(*) FROM cables WHERE b_entity_id=?) AS cables,
              (SELECT COUNT(*) FROM entities WHERE parent_id=?) AS children,
              (SELECT COUNT(*) FROM provider_records WHERE entity_id=?) AS provider_links,
              (SELECT COUNT(*) FROM dns_records WHERE entity_id=?) AS dns_records,
@@ -620,13 +716,31 @@ def delete_entity(entity_id: str, confirm: str, auth: AuthContext = Depends(writ
     if confirm != impact["name"]:
         raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
     with database.transaction() as connection:
-        # Assignments must be removed explicitly because entities protect them
-        # with ON DELETE RESTRICT. Other references safely cascade or unlink.
-        connection.execute("DELETE FROM port_assignments WHERE entity_id=?", (entity_id,))
+        connection.execute("DELETE FROM cables WHERE b_entity_id=?", (entity_id,))
         connection.execute("DELETE FROM topology_nodes WHERE id=?", (f"entity:{entity_id}",))
         connection.execute("DELETE FROM entities WHERE id=?", (entity_id,))
     database.audit(auth.user_id, "entity.delete", "entity", entity_id, impact)
     return {"ok": True}
+
+
+def create_device_ports(connection: sqlite3.Connection, device_id: str, device_type: str, first: int, last: int) -> None:
+    for number in range(first, last + 1):
+        if device_type == "patch_panel":
+            front, rear = f"{device_id}-f{number}", f"{device_id}-r{number}"
+            connection.execute(
+                "INSERT INTO ports(id,physical_device_id,number,side,label) VALUES(?,?,?,?,?)",
+                (front, device_id, number, "front", f"Poort {number}"),
+            )
+            connection.execute(
+                "INSERT INTO ports(id,physical_device_id,number,side,peer_port_id,label) VALUES(?,?,?,?,?,?)",
+                (rear, device_id, number, "rear", front, f"Poort {number} (achter)"),
+            )
+            connection.execute("UPDATE ports SET peer_port_id=? WHERE id=?", (rear, front))
+        else:
+            connection.execute(
+                "INSERT INTO ports(id,physical_device_id,number,label) VALUES(?,?,?,?)",
+                (f"{device_id}-p{number}", device_id, number, f"Poort {number}"),
+            )
 
 
 @app.post("/api/physical-devices")
@@ -640,11 +754,7 @@ def create_physical_device(payload: PhysicalDeviceInput, auth: AuthContext = Dep
                VALUES(?,?,?,?,?,?,?,?,?)""",
             (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, position, now, now),
         )
-        for number in range(1, payload.ports + 1):
-            connection.execute(
-                "INSERT INTO ports(id,physical_device_id,number,label) VALUES(?,?,?,?)",
-                (f"{device_id}-p{number}", device_id, number, f"Poort {number}"),
-            )
+        create_device_ports(connection, device_id, payload.type, 1, payload.ports)
     database.audit(auth.user_id, "physical_device.create", "physical_device", device_id, payload.model_dump())
     return {"id": device_id}
 
@@ -654,10 +764,15 @@ def update_physical_device(device_id: str, payload: PhysicalDeviceInput, auth: A
     device = database.fetch_one("SELECT * FROM physical_devices WHERE id=?", (device_id,))
     if not device:
         raise HTTPException(404, "Netwerkapparaat niet gevonden")
-    ports = database.fetch_all("SELECT * FROM ports WHERE physical_device_id=? ORDER BY number", (device_id,))
-    if payload.ports < len(ports):
+    if (device["type"] == "patch_panel") != (payload.type == "patch_panel"):
+        raise HTTPException(409, "Wissel niet tussen patchpanel en ander type; maak een nieuw apparaat aan")
+    port_count = database.fetch_one(
+        "SELECT COUNT(DISTINCT number) AS n FROM ports WHERE physical_device_id=?", (device_id,)
+    )["n"]
+    if payload.ports < port_count:
         blocked = database.fetch_all(
-            """SELECT p.number FROM ports p JOIN port_assignments pa ON pa.port_id=p.id
+            """SELECT DISTINCT p.number FROM ports p
+               JOIN cables c ON p.id IN (c.a_port_id, c.b_port_id)
                WHERE p.physical_device_id=? AND p.number>? ORDER BY p.number""",
             (device_id, payload.ports),
         )
@@ -669,13 +784,9 @@ def update_physical_device(device_id: str, payload: PhysicalDeviceInput, auth: A
             "UPDATE physical_devices SET name=?,type=?,model=?,location=?,notes=?,updated_at=? WHERE id=?",
             (payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, now, device_id),
         )
-        if payload.ports < len(ports):
+        if payload.ports < port_count:
             connection.execute("DELETE FROM ports WHERE physical_device_id=? AND number>?", (device_id, payload.ports))
-        for number in range(len(ports) + 1, payload.ports + 1):
-            connection.execute(
-                "INSERT INTO ports(id,physical_device_id,number,label) VALUES(?,?,?,?)",
-                (f"{device_id}-p{number}", device_id, number, f"Poort {number}"),
-            )
+        create_device_ports(connection, device_id, payload.type, port_count + 1, payload.ports)
     database.audit(auth.user_id, "physical_device.update", "physical_device", device_id, payload.model_dump())
     return {"ok": True}
 
@@ -686,8 +797,8 @@ def physical_device_deletion_impact(device_id: str) -> dict[str, Any]:
         raise HTTPException(404, "Netwerkapparaat niet gevonden")
     counts = database.fetch_one(
         """SELECT
-             (SELECT COUNT(*) FROM ports WHERE physical_device_id=?) AS ports,
-             (SELECT COUNT(*) FROM port_assignments pa JOIN ports p ON p.id=pa.port_id WHERE p.physical_device_id=?) AS port_assignments,
+             (SELECT COUNT(*) FROM ports WHERE physical_device_id=? AND side='front') AS ports,
+             (SELECT COUNT(*) FROM cables c JOIN ports p ON p.id IN (c.a_port_id, c.b_port_id) WHERE p.physical_device_id=?) AS cables,
              (SELECT COUNT(*) FROM topology_relations WHERE from_node_id=? OR to_node_id=?) AS topology_relations""",
         (device_id, device_id, f"physical:{device_id}", f"physical:{device_id}"),
     )
@@ -724,32 +835,101 @@ def update_port(port_id: str, payload: PortInput, auth: AuthContext = Depends(wr
     return {"ok": True}
 
 
-@app.put("/api/ports/{port_id}/assignment")
-def assign_port(port_id: str, payload: PortAssignmentInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
-    if not database.fetch_one("SELECT id FROM ports WHERE id=?", (port_id,)):
+def validate_cable(payload: CableInput, replace_port_id: str | None = None) -> None:
+    """Controleer uiteinden en bezetting; replace_port_id mag zijn eigen kabel vervangen."""
+    if (payload.b_port_id is None) == (payload.b_entity_id is None):
+        raise HTTPException(422, "Kies precies één ander uiteinde: een poort of een device")
+    if not database.fetch_one("SELECT id FROM ports WHERE id=?", (payload.a_port_id,)):
         raise HTTPException(404, "Poort niet gevonden")
-    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (payload.entity_id,)):
+    if payload.b_port_id:
+        if payload.b_port_id == payload.a_port_id:
+            raise HTTPException(422, "Een kabel kan niet twee keer in dezelfde poort")
+        if not database.fetch_one("SELECT id FROM ports WHERE id=?", (payload.b_port_id,)):
+            raise HTTPException(404, "Doelpoort niet gevonden")
+    if payload.b_entity_id and not database.fetch_one("SELECT id FROM entities WHERE id=?", (payload.b_entity_id,)):
         raise HTTPException(404, "Device niet gevonden")
-    existing = database.fetch_one("SELECT port_id FROM port_assignments WHERE entity_id=? AND port_id!=?", (payload.entity_id, port_id))
-    if existing:
-        raise HTTPException(409, "Dit device is al aan een andere poort gekoppeld")
+    for port_id in filter(None, (payload.a_port_id, payload.b_port_id)):
+        occupied = database.fetch_one(
+            "SELECT id FROM cables WHERE (a_port_id=? OR b_port_id=?)", (port_id, port_id)
+        )
+        if occupied and not (replace_port_id and port_id == replace_port_id):
+            raise HTTPException(409, f"Poort {port_id} is al bezet; koppel die eerst los")
+    if payload.b_entity_id:
+        linked = database.fetch_one(
+            "SELECT a_port_id FROM cables WHERE b_entity_id=?", (payload.b_entity_id,)
+        )
+        if linked and not (replace_port_id and linked["a_port_id"] == replace_port_id):
+            raise HTTPException(409, "Dit device is al aan een andere poort gekoppeld")
+
+
+def insert_cable(payload: CableInput, user_id: str) -> dict[str, Any]:
+    cable_id = str(uuid.uuid4())
     with database.transaction() as connection:
         connection.execute(
-            """INSERT INTO port_assignments(port_id,entity_id,cable_label,cable_color,notes,updated_at,updated_by)
-               VALUES(?,?,?,?,?,?,?)
-               ON CONFLICT(port_id) DO UPDATE SET entity_id=excluded.entity_id,cable_label=excluded.cable_label,
-               cable_color=excluded.cable_color,notes=excluded.notes,updated_at=excluded.updated_at,updated_by=excluded.updated_by""",
-            (port_id, payload.entity_id, payload.cable_label, payload.cable_color, payload.notes, utcnow(), auth.user_id),
+            """INSERT INTO cables(id,a_port_id,b_port_id,b_entity_id,label,color,notes,updated_at,updated_by)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (cable_id, payload.a_port_id, payload.b_port_id, payload.b_entity_id,
+             payload.label, payload.color, payload.notes, utcnow(), user_id),
         )
-    database.audit(auth.user_id, "port.assign", "port", port_id, payload.model_dump())
+    return database.fetch_one("SELECT * FROM cables WHERE id=?", (cable_id,))
+
+
+@app.get("/api/ports/{port_id}/trace")
+def port_trace(port_id: str, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    ports, _cables, by_port = load_cable_context()
+    if port_id not in ports:
+        raise HTTPException(404, "Poort niet gevonden")
+    devices = {row["id"]: row for row in database.fetch_all("SELECT id,name,type FROM physical_devices")}
+    hops, entity_id = trace_from_port(port_id, ports, by_port)
+    steps = [{"label": port_display_name(ports[port_id], devices), "kind": "start"}]
+    for hop in hops:
+        if hop["kind"] == "through":
+            steps.append({"label": port_display_name(ports[hop["peer_port_id"]], devices), "kind": "through"})
+        elif hop.get("entity_id"):
+            entity = database.fetch_one("SELECT name,type,status FROM entities WHERE id=?", (hop["entity_id"],))
+            steps.append({"label": entity["name"] if entity else "?", "kind": "entity",
+                          "status": entity["status"] if entity else None, "cable_id": hop["cable_id"]})
+        else:
+            steps.append({"label": port_display_name(ports[hop["port_id"]], devices), "kind": "port",
+                          "cable_id": hop["cable_id"]})
+    return {"port_id": port_id, "entity_id": entity_id, "steps": steps}
+
+
+@app.post("/api/cables")
+def cable_create(payload: CableInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    validate_cable(payload)
+    cable = insert_cable(payload, auth.user_id)
+    database.audit(auth.user_id, "cable.create", "cable", cable["id"], payload.model_dump())
+    return cable
+
+
+@app.delete("/api/cables/{cable_id}")
+def cable_delete(cable_id: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    with database.transaction() as connection:
+        cursor = connection.execute("DELETE FROM cables WHERE id=?", (cable_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(404, "Kabel niet gevonden")
+    database.audit(auth.user_id, "cable.delete", "cable", cable_id)
     return {"ok": True}
 
 
-@app.delete("/api/ports/{port_id}/assignment")
-def unassign_port(port_id: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+@app.put("/api/ports/{port_id}/cable")
+def port_cable_set(port_id: str, payload: PortCableInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Gemaksvorm voor de poortdrawer: vervang de kabel op deze poort in één stap."""
+    cable_input = CableInput(a_port_id=port_id, **payload.model_dump())
+    validate_cable(cable_input, replace_port_id=port_id)
     with database.transaction() as connection:
-        connection.execute("DELETE FROM port_assignments WHERE port_id=?", (port_id,))
-    database.audit(auth.user_id, "port.unassign", "port", port_id)
+        connection.execute("DELETE FROM cables WHERE a_port_id=? OR b_port_id=?", (port_id, port_id))
+    cable = insert_cable(cable_input, auth.user_id)
+    database.audit(auth.user_id, "port.cable.set", "port", port_id, payload.model_dump())
+    return cable
+
+
+@app.delete("/api/ports/{port_id}/cable")
+def port_cable_clear(port_id: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM cables WHERE a_port_id=? OR b_port_id=?", (port_id, port_id))
+    database.audit(auth.user_id, "port.cable.clear", "port", port_id)
     return {"ok": True}
 
 
@@ -904,7 +1084,7 @@ def backup_restore(name: str, confirm: str, auth: AuthContext = Depends(write_au
 
 
 CONFIG_TABLES = (
-    "providers", "physical_devices", "entities", "ports", "port_assignments",
+    "providers", "physical_devices", "entities", "ports", "cables",
     "topology_nodes", "topology_relations", "dns_records", "speedtest_settings",
 )
 
@@ -958,8 +1138,11 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     if table == "entities" and row.get("parent_id"):
                         entity_parents.append((str(row["parent_id"]), str(row[primary])))
                         row["parent_id"] = None
-                    if table == "port_assignments":
+                    if table == "cables":
                         row["updated_by"] = None
+                    if table == "ports":
+                        # Front/rear-paren worden na de tabel opnieuw gelegd.
+                        row["peer_port_id"] = None
                     if table == "topology_nodes":
                         row["parent_node_id"] = None
                     columns = list(row)
@@ -972,6 +1155,11 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     imported += 1
             for parent_id, entity_id in entity_parents:
                 connection.execute("UPDATE entities SET parent_id=? WHERE id=?", (parent_id, entity_id))
+            for raw in payload["tables"].get("ports", []):
+                if isinstance(raw, dict) and raw.get("peer_port_id"):
+                    connection.execute(
+                        "UPDATE ports SET peer_port_id=? WHERE id=?", (raw["peer_port_id"], raw["id"])
+                    )
             for raw in payload["tables"].get("topology_nodes", []):
                 if raw.get("parent_node_id"):
                     connection.execute(

@@ -79,9 +79,41 @@ async function loadData(silent = false) {
   try {
     state.data = await api("/api/bootstrap");
     renderAll();
-    $("#last-refresh").textContent = `bijgewerkt ${new Date().toLocaleTimeString("nl-NL", {hour:"2-digit",minute:"2-digit"})}`;
+    stampRefresh();
     if (!silent) toast("Gegevens bijgewerkt");
   } catch (error) { toast(error.message, "error"); }
+}
+
+function stampRefresh() {
+  $("#last-refresh").textContent = `bijgewerkt ${new Date().toLocaleTimeString("nl-NL", {hour:"2-digit",minute:"2-digit"})}`;
+}
+
+// De 30s-poll haalt alleen statussen op; de volledige bootstrap komt bij het
+// laden en na elke mutatie. Scheelt bij groei de hele inventaris per tick.
+async function pollSummary() {
+  if (!state.data) return;
+  try {
+    const summary = await api("/api/summary");
+    const byId = new Map(summary.entities.map(item => [item.id, item]));
+    state.data.entities.forEach(entity => {
+      const fresh = byId.get(entity.id);
+      if (fresh) Object.assign(entity, fresh);
+    });
+    (state.data.topology?.nodes || []).forEach(node => {
+      if (node.reference_type === "entity") {
+        const fresh = byId.get(node.reference_id);
+        if (fresh) node.status = fresh.status;
+        node.metrics = summary.metrics[node.reference_id] || node.metrics;
+      }
+    });
+    state.data.physical_devices.forEach(device => device.ports.forEach(port => {
+      if (port.entity_id && byId.has(port.entity_id)) port.entity_status = byId.get(port.entity_id).status;
+    }));
+    state.data.counts = summary.counts;
+    state.data.speedtest = {...state.data.speedtest, ...summary.speedtest};
+    renderAll();
+    stampRefresh();
+  } catch (error) { /* stille poll: fouten verschijnen bij de volgende actie */ }
 }
 
 function renderAll() {
@@ -110,6 +142,21 @@ function renderSummary() {
   $("#admin-badge").classList.toggle("hidden", attention === 0);
 }
 
+function portRow(port, device) {
+  const title = port.link_kind === "port"
+    ? `→ ${port.target_port_label || "poort"}${port.entity_name ? ` · ${port.entity_name}` : ""}`
+    : port.entity_name || "Vrije poort";
+  const detail = port.cable_id
+    ? (port.hostname || port.ip_address || port.cable_label || port.label)
+    : `${port.label} · ${port.speed_mbps || "?"} Mbps`;
+  return `
+    <button class="port ${port.cable_id ? "assigned" : ""} ${port.side === "rear" ? "rear" : ""}" data-port-id="${port.id}" data-device-id="${device.id}">
+      <span class="port-number">${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""}</span>
+      <span class="port-name"><strong>${esc(title)}</strong><span>${esc(detail)}</span></span>
+      <span class="port-status">${port.entity_id ? `${statusDot(port.entity_status)}${esc(port.entity_status || "unknown")}` : "—"}</span>
+    </button>`;
+}
+
 function renderPatch() {
   const devices = state.data.physical_devices;
   $("#device-count").textContent = `${devices.length} apparaten · ${state.data.counts.ports} poorten`;
@@ -120,12 +167,7 @@ function renderPatch() {
         <div class="device-head-actions"><span class="device-kind">${device.type === "mesh_ap" ? "MESH AP" : device.type.replace("_", " ").toUpperCase()}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
       </header>
       <div class="ports">
-        ${device.ports.map(port => `
-          <button class="port ${port.entity_id ? "assigned" : ""}" data-port-id="${port.id}" data-device-id="${device.id}">
-            <span class="port-number">${String(port.number).padStart(2,"0")}</span>
-            <span class="port-name"><strong>${esc(port.entity_name || "Vrije poort")}</strong><span>${esc(port.entity_id ? (port.hostname || port.ip_address || port.cable_label || port.label) : `${port.label} · ${port.speed_mbps || "?"} Mbps`)}</span></span>
-            <span class="port-status">${port.entity_id ? `${statusDot(port.entity_status)}${esc(port.entity_status || "unknown")}` : "—"}</span>
-          </button>`).join("")}
+        ${device.ports.map(port => portRow(port, device)).join("")}
       </div>
     </article>`).join("");
   const manual=state.data.entities.filter(entity=>entity.origin==="manual");
@@ -245,7 +287,7 @@ function renderAdmin() {
   }).join("");
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
   $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(entity.type)} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-link-entity="${entity.id}">Poort</button><button class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
+    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(entity.vendor || entity.type)} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-link-entity="${entity.id}">Poort</button><button class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#inactive-discovery-count").textContent=`${inactive.length} items`;
   $("#inactive-discoveries-list").innerHTML=inactive.length?inactive.map(entity=>`<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${entity.archived?"gearchiveerd":"genegeerd"}</span></div></div><div>${esc(entity.ip_address||entity.hostname||"—")}</div><div>${statusDot(entity.status)} ${esc(entity.status)}</div><button class="button" data-discovery-state="restore" data-entity-id="${entity.id}">Herstellen</button></div>`).join(""):`<div class="empty-state">Geen genegeerde of gearchiveerde discoveries.</div>`;
   const mappings=(state.data.provider_records||[]).slice(0,250);$("#mapping-count").textContent=`${state.data.provider_records?.length||0} records`;
@@ -294,19 +336,46 @@ function openPort(portId, deviceId) {
   form.elements.port_id.value = port.id;
   form.elements.cable_label.value = port.cable_label || "";
   form.elements.cable_color.value = port.cable_color || "";
-  form.elements.notes.value = port.assignment_notes || "";
+  form.elements.notes.value = port.cable_notes || "";
   $("#drawer-title").textContent = port.label || `Poort ${port.number}`;
-  $("#drawer-device").textContent = device.name;
+  $("#drawer-device").textContent = `${device.name}${port.side === "rear" ? " · achterzijde" : ""}`;
   $("#drawer-speed").textContent = `${port.speed_mbps || "?"} Mbps`;
-  const occupiedElsewhere = new Set(state.data.physical_devices.flatMap(item => item.ports.filter(p => p.entity_id && p.id !== port.id).map(p => p.entity_id)));
-  const entities = state.data.entities.filter(entity => !occupiedElsewhere.has(entity.id) && !["service","container","vm","lxc"].includes(entity.type));
-  form.elements.entity_id.innerHTML = `<option value="">Niet aangesloten</option>${entities.map(entity => `<option value="${entity.id}">${esc(entity.name)}${entity.ip_address ? ` · ${esc(entity.ip_address)}` : ""}</option>`).join("")}`;
-  form.elements.entity_id.value = state.pendingEntityId || port.entity_id || "";
+  form.elements.entity_id.innerHTML = `<option value="">Niet aangesloten</option>${connectableEntities(port).map(entity => `<option value="${entity.id}">${esc(entity.name)}${entity.ip_address ? ` · ${esc(entity.ip_address)}` : ""}</option>`).join("")}`;
+  form.elements.entity_id.value = state.pendingEntityId || (port.link_kind === "entity" ? port.entity_id : "") || "";
+  form.elements.b_port_id.innerHTML = `<option value="">Geen doorverbinding</option>${freePorts(port).map(item => `<option value="${item.id}">${esc(item.display)}</option>`).join("")}`;
+  form.elements.b_port_id.value = port.link_kind === "port" ? (port.target_port_id || "") : "";
   state.pendingEntityId = null;
-  $("#disconnect-port").classList.toggle("hidden", !port.entity_id);
+  $("#disconnect-port").classList.toggle("hidden", !port.cable_id);
+  renderTrace(port);
   $("#drawer-backdrop").classList.remove("hidden");
   $("#port-drawer").classList.add("open");
   $("#port-drawer").setAttribute("aria-hidden", "false");
+}
+
+// Devices die nog vrij zijn (of aan déze poort hangen); virtuele objecten
+// hangen nooit direct aan een kabel.
+function connectableEntities(port) {
+  const linked = new Set(state.data.physical_devices.flatMap(device =>
+    device.ports.filter(item => item.link_kind === "entity" && item.id !== port.id).map(item => item.entity_id)));
+  return state.data.entities.filter(entity =>
+    !linked.has(entity.id) && !["service", "container", "vm", "lxc"].includes(entity.type));
+}
+
+function freePorts(port) {
+  return state.data.physical_devices.flatMap(device => device.ports
+    .filter(item => item.id !== port.id && (!item.cable_id || item.id === port.target_port_id))
+    .map(item => ({id: item.id, display: `${device.name} · poort ${item.number}${item.side === "rear" ? " (achter)" : ""}`})));
+}
+
+async function renderTrace(port) {
+  const box = $("#drawer-trace");
+  if (!port.cable_id) { box.innerHTML = ""; return; }
+  try {
+    const trace = await api(`/api/ports/${encodeURIComponent(port.id)}/trace`);
+    box.innerHTML = `<span class="data-cell-label">Kabeltrace</span><div class="trace">${trace.steps.map(step =>
+      `<span class="trace-step ${esc(step.kind)}">${step.kind === "entity" ? statusDot(step.status) : ""}${esc(step.label)}</span>`
+    ).join('<span class="trace-arrow">→</span>')}</div>`;
+  } catch { box.innerHTML = ""; }
 }
 
 function closeDrawer() {
@@ -409,7 +478,7 @@ async function confirmDeletion(kind,id) {
     const impact=await api(`${base}/${encodeURIComponent(id)}/deletion-impact`);
     if(!impact.deletable){toast("Dit geïmporteerde device beheer je in de databron","error");return;}
     const c=impact.counts||{}, lines=[];
-    if(c.port_assignments)lines.push(`${c.port_assignments} actieve poortkoppeling(en) worden verwijderd`);
+    if(c.cables)lines.push(`${c.cables} kabelkoppeling(en) worden verwijderd`);
     if(kind==="physical"&&c.ports)lines.push(`${c.ports} poorten worden verwijderd`);
     if(c.children)lines.push(`${c.children} onderliggende node(s) worden losgekoppeld`);
     if(c.dns_records)lines.push(`${c.dns_records} DNS-record(s) blijven bestaan maar worden losgekoppeld`);
@@ -485,17 +554,25 @@ $("#physical-form").addEventListener("submit", async event => {
 });
 
 $("#port-form").addEventListener("submit", async event => {
-  event.preventDefault(); const payload = Object.fromEntries(new FormData(event.currentTarget)); const portId = payload.port_id; delete payload.port_id;
+  event.preventDefault();
+  const form = event.currentTarget, portId = form.elements.port_id.value;
+  const payload = {
+    b_entity_id: form.elements.entity_id.value || null,
+    b_port_id: form.elements.b_port_id.value || null,
+    label: form.elements.cable_label.value, color: form.elements.cable_color.value,
+    notes: form.elements.notes.value,
+  };
+  if (payload.b_entity_id && payload.b_port_id) return toast("Kies één ander uiteinde: een device óf een poort", "error");
   try {
-    if (payload.entity_id) await api(`/api/ports/${portId}/assignment`, {method:"PUT", body:JSON.stringify(payload)});
-    else await api(`/api/ports/${portId}/assignment`, {method:"DELETE"});
-    closeDrawer(); await loadData(true); toast(payload.entity_id ? "Poort opgeslagen" : "Poort vrijgemaakt");
+    if (payload.b_entity_id || payload.b_port_id) await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"PUT", body:JSON.stringify(payload)});
+    else await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"DELETE"});
+    closeDrawer(); await loadData(true); toast(payload.b_entity_id || payload.b_port_id ? "Kabel opgeslagen" : "Poort vrijgemaakt");
   } catch(error){toast(error.message,"error");}
 });
 
 $("#disconnect-port").addEventListener("click", async () => {
   const portId = $("#port-form").elements.port_id.value;
-  try { await api(`/api/ports/${portId}/assignment`, {method:"DELETE"}); closeDrawer(); await loadData(true); toast("Device losgekoppeld"); } catch(error){toast(error.message,"error");}
+  try { await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"DELETE"}); closeDrawer(); await loadData(true); toast("Kabel losgekoppeld"); } catch(error){toast(error.message,"error");}
 });
 
 $("#provider-form").addEventListener("submit", async event => {
@@ -555,6 +632,6 @@ $("#run-speedtest").addEventListener("click",async event=>{event.currentTarget.d
 $("#speed-settings-button").addEventListener("click",()=>{const settings=state.data.speedtest.settings,form=$("#speed-form");form.elements.enabled.checked=settings.enabled;form.elements.interval_seconds.value=String(settings.interval_seconds);form.elements.server_id.value=settings.server_id||"";form.elements.interface_name.value=settings.interface_name||"";form.elements.duration_seconds.value=settings.duration_seconds;$("#speed-dialog").showModal();});
 $("#speed-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.enabled=form.elements.enabled.checked;payload.interval_seconds=Number(payload.interval_seconds);payload.duration_seconds=Number(payload.duration_seconds);payload.server_id=payload.server_id||null;payload.interface_name=payload.interface_name||null;try{await api("/api/speedtest/settings",{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Speedtestinstellingen opgeslagen");}catch(error){toast(error.message,"error");}});
 
-setInterval(()=>{if(state.data&&!document.hidden)loadData(true);},30000);
+setInterval(()=>{if(state.data&&!document.hidden)pollSummary();},30000);
 
 initialize();
