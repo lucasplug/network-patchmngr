@@ -56,8 +56,17 @@
         <div class="heading-actions"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
       </div>
       <div id="summary-chips" class="chips"></div>
-      <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
-      <div id="physical-grid" class="physical-grid"></div>
+      <div class="patch-layout">
+        <div>
+          <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
+          <div id="physical-grid" class="physical-grid"></div>
+        </div>
+        <aside class="unpatched-panel glass" id="unpatched-drop">
+          <div class="side-title">Nog te koppelen <span class="muted" id="unpatched-count"></span></div>
+          <p class="muted tiny">Sleep een device op een poort. Sleep een kabel hierheen om los te koppelen, of klik een device om een poort te kiezen.</p>
+          <div id="unpatched-list" class="chip-list"></div>
+        </aside>
+      </div>
       <div class="section-bar with-space"><span>Handmatige devices</span><span class="muted" id="manual-entity-count"></span></div>
       <div id="manual-entities-list" class="data-list"></div>
     </section>
@@ -191,6 +200,15 @@
   <dialog id="merge-dialog" class="modal glass"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
 
   <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
+
+  <dialog id="quick-link-dialog" class="modal glass">
+    <form id="quick-link-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Koppelen zonder slepen</p><h2 id="quick-link-title">Device koppelen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="entity_id">
+      <label>Kies een vrije poort<select name="port_id" required></select></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Koppelen</button></div>
+    </form>
+  </dialog>
 
   <dialog id="wizard-dialog" class="modal wide glass wizard">
     <div class="modal-head">

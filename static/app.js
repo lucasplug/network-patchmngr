@@ -147,37 +147,118 @@ function renderSummary() {
   $("#admin-badge").classList.toggle("hidden", attention === 0);
 }
 
-function portRow(port, device) {
-  const title = port.link_kind === "port"
-    ? `→ ${port.target_port_label || "poort"}${port.entity_name ? ` · ${port.entity_name}` : ""}`
-    : port.entity_name || "Vrije poort";
-  const detail = port.cable_id
-    ? (port.hostname || port.ip_address || port.cable_label || port.label)
-    : `${port.label} · ${port.speed_mbps || "?"} Mbps`;
+// Kabelkleur uit het label; onbekende namen krijgen de neutrale accentkleur.
+const CABLE_COLORS = {blauw:"#4d8cff",rood:"#ff6262",geel:"#ffd166",groen:"#3ddc97",zwart:"#5a6474",wit:"#e6ecf5",grijs:"#8b95a6",oranje:"#ffb454",paars:"#a99cff"};
+function cableColor(name) { return CABLE_COLORS[String(name || "").toLowerCase().trim()] || "#6f7a8c"; }
+
+function portLabelFor(port) {
+  if (port.link_kind === "port") return `→ ${port.target_port_label || "poort"}${port.entity_name ? ` · ${port.entity_name}` : ""}`;
+  return port.entity_name || "Vrije poort";
+}
+
+// Eén poort in het apparaatfront: klikbaar, sleepbaar en keyboard-bereikbaar.
+function portFace(port, device) {
+  const status = port.entity_id ? (port.entity_status || "unknown") : "free";
+  const tip = `${device.name} · poort ${port.number}${port.side === "rear" ? " (achter)" : ""}: ${portLabelFor(port)}${port.cable_label ? ` · kabel ${port.cable_label}` : ""}`;
+  return `<button class="port-face ${port.cable_id ? "occupied" : ""} status-${esc(status)}"
+      data-port-id="${esc(port.id)}" data-device-id="${esc(device.id)}" data-drop-port="${esc(port.id)}"
+      ${port.cable_id ? 'draggable="true"' : ""} title="${esc(tip)}" aria-label="${esc(tip)}">
+    <span class="face-num">${String(port.number).padStart(2, "0")}${port.side === "rear" ? "r" : ""}</span>
+    <span class="face-cable" style="background:${port.cable_id ? cableColor(port.cable_color) : "transparent"}"></span>
+  </button>`;
+}
+
+function deviceFace(device) {
+  const fronts = device.ports.filter(port => port.side !== "rear");
+  const rears = device.ports.filter(port => port.side === "rear");
+  const used = device.ports.filter(port => port.cable_id).length;
   return `
-    <button class="port ${port.cable_id ? "assigned" : ""} ${port.side === "rear" ? "rear" : ""}" data-port-id="${port.id}" data-device-id="${device.id}">
-      <span class="port-number">${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""}</span>
-      <span class="port-name"><strong>${esc(title)}</strong><span>${esc(detail)}</span></span>
-      <span class="port-status">${port.entity_id ? `${statusDot(port.entity_status)}${esc(port.entity_status || "unknown")}` : "—"}</span>
-    </button>`;
+    <article class="device-card" data-device-card="${esc(device.id)}">
+      <header class="device-head">
+        <div><div class="device-title">${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet</div></div>
+        <div class="device-head-actions"><span class="device-kind">${device.type === "mesh_ap" ? "MESH AP" : device.type.replace("_", " ").toUpperCase()}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
+      </header>
+      <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
+      ${rears.length ? `<div class="front-label">achterzijde</div><div class="device-front rear">${rears.map(port => portFace(port, device)).join("")}</div>` : ""}
+      <div class="port-legend">${device.ports.filter(port => port.cable_id).slice(0, 6).map(port =>
+        `<span class="legend-item"><i style="background:${cableColor(port.cable_color)}"></i>${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""} ${esc(shorten(portLabelFor(port), 22))}</span>`).join("") || `<span class="muted tiny">Nog niets gepatcht — sleep een device op een poort of klik erop.</span>`}</div>
+    </article>`;
 }
 
 function renderPatch() {
   const devices = state.data.physical_devices;
   $("#device-count").textContent = `${devices.length} apparaten · ${state.data.counts.ports} poorten`;
-  $("#physical-grid").innerHTML = devices.map(device => `
-    <article class="device-card">
-      <header class="device-head">
-        <div><div class="device-title">${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""}</div></div>
-        <div class="device-head-actions"><span class="device-kind">${device.type === "mesh_ap" ? "MESH AP" : device.type.replace("_", " ").toUpperCase()}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
-      </header>
-      <div class="ports">
-        ${device.ports.map(port => portRow(port, device)).join("")}
-      </div>
-    </article>`).join("");
+  $("#physical-grid").innerHTML = devices.map(deviceFace).join("");
+  renderUnpatched();
   const manual=state.data.entities.filter(entity=>entity.origin==="manual");
   $("#manual-entity-count").textContent=`${manual.length} devices`;
   $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(entity.type)} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-entity-edit="${entity.id}">Wijzig</button><button class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
+}
+
+// Zijlijst: devices zonder kabel, sleepbaar naar een poort.
+function renderUnpatched() {
+  const linked = new Set(state.data.physical_devices.flatMap(device =>
+    device.ports.filter(port => port.link_kind === "entity").map(port => port.entity_id)));
+  const free = state.data.entities.filter(entity =>
+    !linked.has(entity.id) && !entity.archived && !["service", "container", "vm", "lxc"].includes(entity.type));
+  $("#unpatched-count").textContent = `${free.length} vrij`;
+  $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
+    <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
+      ${statusDot(entity.status)}<span>${esc(entity.name)}</span><small>${esc(entity.vendor || entity.ip_address || entity.type)}</small>
+    </button>`).join("") : `<div class="empty-state">Alles is gekoppeld.</div>`;
+}
+
+/* ------------------------------------------------- koppelen (muis/touch/toets) */
+// Eén gedeeld pad voor alle koppelacties, zodat slepen en klikken exact
+// hetzelfde doen: kabel leggen, verplaatsen of loskoppelen.
+let dragPayload = null;
+
+async function linkEntityToPort(entityId, portId) {
+  const previous = findPortByEntity(entityId);
+  try {
+    await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method: "PUT", body: JSON.stringify({b_entity_id: entityId})});
+    await loadData(true);
+    const name = state.data.entities.find(item => item.id === entityId)?.name || "Device";
+    toast(previous ? `${name} verplaatst` : `${name} gekoppeld`);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function moveCable(fromPortId, toPortId) {
+  const port = findPort(fromPortId);
+  if (!port || !port.cable_id) return;
+  const payload = port.link_kind === "entity"
+    ? {b_entity_id: port.entity_id, label: port.cable_label, color: port.cable_color, notes: port.cable_notes}
+    : {b_port_id: port.target_port_id, label: port.cable_label, color: port.cable_color, notes: port.cable_notes};
+  try {
+    await api(`/api/ports/${encodeURIComponent(fromPortId)}/cable`, {method: "DELETE"});
+    await api(`/api/ports/${encodeURIComponent(toPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
+    await loadData(true);
+    toast("Kabel verplaatst");
+  } catch (error) { toast(error.message, "error"); await loadData(true); }
+}
+
+async function unlinkPort(portId) {
+  try {
+    await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method: "DELETE"});
+    await loadData(true);
+    toast("Kabel losgekoppeld");
+  } catch (error) { toast(error.message, "error"); }
+}
+
+function findPort(portId) {
+  for (const device of state.data.physical_devices) {
+    const port = device.ports.find(item => item.id === portId);
+    if (port) return port;
+  }
+  return null;
+}
+
+function findPortByEntity(entityId) {
+  for (const device of state.data.physical_devices) {
+    const port = device.ports.find(item => item.link_kind === "entity" && item.entity_id === entityId);
+    if (port) return port;
+  }
+  return null;
 }
 
 function renderTopology() {
@@ -860,4 +941,115 @@ document.addEventListener("change", event => {
   const row = select.closest("[data-assign-id]");
   $("[data-assign-target]", row).classList.toggle("hidden", select.value !== "merge");
   $("[data-assign-port]", row).classList.toggle("hidden", select.value !== "promote");
+});
+
+/* --------------------------------------------------- drag-and-drop koppelen */
+// HTML5-drag voor muis; pointer-events voor touch; en een select-dialoog voor
+// wie geen van beide gebruikt. Alle drie lopen via dezelfde functies hierboven.
+const patchGrid = () => $("#patch-view");
+
+document.addEventListener("dragstart", event => {
+  const chip = event.target.closest("[data-drag-entity]");
+  const face = event.target.closest(".port-face.occupied");
+  if (chip) dragPayload = {kind: "entity", id: chip.dataset.dragEntity};
+  else if (face) dragPayload = {kind: "port", id: face.dataset.portId};
+  else return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", dragPayload.id);
+  (chip || face).classList.add("dragging");
+});
+
+document.addEventListener("dragend", event => {
+  $$(".dragging").forEach(item => item.classList.remove("dragging"));
+  $$(".drop-target").forEach(item => item.classList.remove("drop-target"));
+  dragPayload = null;
+});
+
+document.addEventListener("dragover", event => {
+  const target = event.target.closest("[data-drop-port]");
+  if (!target || !dragPayload) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  target.classList.add("drop-target");
+});
+
+document.addEventListener("dragleave", event => {
+  const target = event.target.closest("[data-drop-port]");
+  if (target) target.classList.remove("drop-target");
+});
+
+document.addEventListener("drop", async event => {
+  const target = event.target.closest("[data-drop-port]");
+  if (!target || !dragPayload) return;
+  event.preventDefault();
+  target.classList.remove("drop-target");
+  const payload = dragPayload;
+  dragPayload = null;
+  if (payload.kind === "entity") await linkEntityToPort(payload.id, target.dataset.dropPort);
+  else if (payload.id !== target.dataset.dropPort) await moveCable(payload.id, target.dataset.dropPort);
+});
+
+// Slepen naar de zijlijst = loskoppelen.
+$("#unpatched-drop").addEventListener("dragover", event => { if (dragPayload?.kind === "port") { event.preventDefault(); event.currentTarget.classList.add("drop-target"); } });
+$("#unpatched-drop").addEventListener("dragleave", event => event.currentTarget.classList.remove("drop-target"));
+$("#unpatched-drop").addEventListener("drop", async event => {
+  event.preventDefault();
+  event.currentTarget.classList.remove("drop-target");
+  if (dragPayload?.kind === "port") { const id = dragPayload.id; dragPayload = null; await unlinkPort(id); }
+});
+
+// Touch: lang indrukken pakt op, loslaten boven een poort zet neer.
+let touchDrag = null;
+document.addEventListener("pointerdown", event => {
+  if (event.pointerType === "mouse") return;
+  const chip = event.target.closest("[data-drag-entity]");
+  const face = event.target.closest(".port-face.occupied");
+  if (!chip && !face) return;
+  const source = chip || face;
+  touchDrag = {timer: setTimeout(() => {
+    dragPayload = chip ? {kind: "entity", id: chip.dataset.dragEntity} : {kind: "port", id: face.dataset.portId};
+    source.classList.add("dragging");
+    toast("Sleep naar een poort en laat los");
+  }, 350), source};
+}, {passive: true});
+
+document.addEventListener("pointermove", event => {
+  if (!dragPayload || event.pointerType === "mouse") return;
+  $$(".drop-target").forEach(item => item.classList.remove("drop-target"));
+  const element = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-port]");
+  if (element) element.classList.add("drop-target");
+});
+
+document.addEventListener("pointerup", async event => {
+  if (touchDrag) { clearTimeout(touchDrag.timer); touchDrag.source.classList.remove("dragging"); touchDrag = null; }
+  if (!dragPayload || event.pointerType === "mouse") return;
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-port]");
+  $$(".drop-target,.dragging").forEach(item => item.classList.remove("drop-target", "dragging"));
+  const payload = dragPayload;
+  dragPayload = null;
+  if (!target) return;
+  if (payload.kind === "entity") await linkEntityToPort(payload.id, target.dataset.dropPort);
+  else if (payload.id !== target.dataset.dropPort) await moveCable(payload.id, target.dataset.dropPort);
+});
+
+// Zonder muis: klik een device in de zijlijst en kies een poort uit een lijst.
+document.addEventListener("click", event => {
+  const chip = event.target.closest("[data-drag-entity]");
+  if (!chip) return;
+  const entity = state.data.entities.find(item => item.id === chip.dataset.dragEntity);
+  const form = $("#quick-link-form");
+  form.elements.entity_id.value = chip.dataset.dragEntity;
+  $("#quick-link-title").textContent = `${entity?.name || "Device"} koppelen`;
+  const options = state.data.physical_devices.flatMap(device => device.ports
+    .filter(port => !port.cable_id)
+    .map(port => `<option value="${esc(port.id)}">${esc(device.name)} · poort ${port.number}${port.side === "rear" ? " (achter)" : ""}</option>`));
+  form.elements.port_id.innerHTML = options.join("") || `<option value="">Geen vrije poort</option>`;
+  $("#quick-link-dialog").showModal();
+});
+
+$("#quick-link-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget, entityId = form.elements.entity_id.value, portId = form.elements.port_id.value;
+  form.closest("dialog").close();
+  if (portId) await linkEntityToPort(entityId, portId);
 });
