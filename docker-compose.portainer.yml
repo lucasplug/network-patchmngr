@@ -1,0 +1,62 @@
+# Stack voor Portainer: pullt de kant-en-klare image uit GHCR, dus geen
+# build-context nodig. Plak dit in Portainer > Stacks > Web editor.
+# Voor lokaal ontwikkelen (met build) is docker-compose.yml bedoeld.
+
+services:
+  # Eenmalige rechtenstap: zet de volumes op UID 10001 voordat de app als
+  # niet-root start.
+  patch-manager-init:
+    image: ghcr.io/lucasplug/network-patchmngr:latest
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /data /backups"]
+    volumes:
+      - patch-data:/data
+      - patch-backups:/backups
+
+  patch-manager:
+    image: ghcr.io/lucasplug/network-patchmngr:latest
+    container_name: patch-manager
+    restart: unless-stopped
+    init: true
+    depends_on:
+      patch-manager-init:
+        condition: service_completed_successfully
+
+    # Host networking is nodig om de ARP-tabel van de VM te kunnen lezen.
+    # Poort 8080 moet daarom vrij zijn op de Docker-VM.
+    network_mode: host
+
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    # Bewust geen no-new-privileges: ping krijgt NET_RAW via een file
+    # capability, en no-new-privileges blokkeert die bij execve.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    environment:
+      TZ: Europe/Amsterdam
+      PATCH_SESSION_SECURE: "false"
+      PATCH_TRUSTED_SUBNETS: 192.168.1.0/24,127.0.0.0/8
+      PATCH_BACKUP_SCHEDULE_HOUR: "3"
+      PATCH_BACKUP_RETENTION_DAILY: "14"
+
+    volumes:
+      - patch-data:/data
+      - patch-backups:/backups
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  patch-data:
+  patch-backups:
