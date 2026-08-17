@@ -2,6 +2,10 @@ name: Publish container image
 
 # Bouwt de image en publiceert hem naar GitHub Container Registry, zodat de
 # Docker-VM hem alleen nog hoeft te pullen (Portainer-stack met image:).
+#
+# Bewust met kale docker-commando's in plaats van docker/*-actions: elke
+# action moet eerst van codeload.github.com worden gehaald, en juist die
+# downloads faalden tijdens een GitHub-storing. Nu is er nog één action.
 
 on:
   push:
@@ -19,32 +23,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Determine tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest
-            type=sha,format=short
-
       - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        env:
+          REGISTRY: ghcr.io
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker build \
+            --tag "$IMAGE:latest" \
+            --tag "$IMAGE:${GITHUB_SHA::7}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          echo "Gepubliceerd: $IMAGE:latest en $IMAGE:${GITHUB_SHA::7}"
