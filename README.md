@@ -6,10 +6,13 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 
 ## Functies
 
-- **Patch** — vijf vooraf ingestelde fysieke apparaten, 25 vrije poorten, handmatige devices, één device per poort en optionele kabelgegevens.
+- **Setup-wizard** — na het aanmaken van de beheerder loodst een wizard je in vier stappen door de eerste inrichting: netwerk scannen, databronnen koppelen (met testverbinding vóór opslaan), gevonden apparaten in bulk toewijzen en een slotoverzicht. Herstartbaar via **Admin → Setup-wizard**; het bulkscherm is ook los bereikbaar voor apparaten die later verschijnen.
+- **Patch** — elk fysiek apparaat wordt getekend als poortenrij met live status en kabelkleur per poort. Koppelen kan door slepen (muis of touch), of muisloos door een device aan te klikken en een poort te kiezen.
+- **Kabels en patchpanelen** — een kabel is een record tussen twee uiteinden: poort↔poort of poort↔device. Patchpanelen krijgen gepaarde voor- en achterpoorten, zodat een verbinding via een paneel als één trace zichtbaar blijft (switch → paneel → wandcontactdoos → device).
+- **Uptime en live stats** — per device een uptime-balk over 30 dagen met percentage en aantal statuswissels, plus sparklines van cpu, geheugen en respons over de laatste 48 uur. De historie heeft een harde retentiegrens (48 uur fijn, 730 dagen dagtotalen) en blijft daarmee onder ~6 MB.
 - **Veilig verwijderen** — handmatige devices en fysieke netwerkapparaten tonen eerst hun afhankelijkheden. Poortkoppelingen en topologierelaties worden opgeruimd; DNS/proxykoppelingen blijven als losgekoppelde records behouden.
 - **Inventarisbeheer** — handmatige devices en fysieke netwerkapparaten kunnen worden bewerkt; het poortaantal kan veilig groeien of krimpen zolang te verwijderen poorten vrij zijn.
-- **Topologie** — geneste hosts/VM's/containers/services, fysieke en virtuele relaties, status en live metrics. In bewerkmodus kun je nodes verslepen, groeperen, hernoemen, plannen en handmatige relaties tekenen.
+- **Topologie** — geneste hosts/VM's/containers/services, fysieke en virtuele relaties, status en live metrics. Pan met slepen, zoom met het scrollwiel of de knoppen; elke node toont één kerngetal (cpu of respons). In bewerkmodus kun je nodes verslepen, groeperen, hernoemen, plannen en handmatige relaties tekenen.
 - **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
 - **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
 - **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.
@@ -18,7 +21,8 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **Audit & undo** — de laatste 200 beheeracties zijn zichtbaar; topologiewijzigingen hebben een server-side undo-geschiedenis van maximaal 50 stappen.
 - Eerste-run beheerder, scrypt-wachtwoordhashing, server-side sessies, HttpOnly-cookie en CSRF-controle.
 - SQLite in WAL-modus met auditlog en consistente online-back-ups.
-- Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager.
+- Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager, elk met een testverbinding die vóór opslaan laat zien wat hij zou vinden.
+- Vendorherkenning van gevonden apparaten via een lokaal IEEE OUI-bestand in de image — geen enkele externe lookup.
 
 ## Starten met Docker Compose
 

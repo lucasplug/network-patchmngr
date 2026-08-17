@@ -19,6 +19,21 @@ def utcnow() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# Harde retentiegrenzen: bewust vast in code, niet instelbaar. Bij ~40 entities
+# blijft dit onder ~6 MB, ongeacht hoe lang de app draait.
+SAMPLE_MINUTES = 5
+SAMPLE_RETENTION_HOURS = 48
+DAY_RETENTION_DAYS = 730
+AUDIT_RETENTION_ROWS = 5000
+
+
+def _as_number(value: Any) -> float | None:
+    try:
+        return round(float(value), 2) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -59,10 +74,12 @@ CREATE TABLE IF NOT EXISTS ports (
   id TEXT PRIMARY KEY,
   physical_device_id TEXT NOT NULL REFERENCES physical_devices(id) ON DELETE CASCADE,
   number INTEGER NOT NULL,
+  side TEXT NOT NULL DEFAULT 'front' CHECK(side IN ('front','rear')),
+  peer_port_id TEXT REFERENCES ports(id) ON DELETE SET NULL,
   label TEXT NOT NULL DEFAULT '',
   speed_mbps INTEGER,
   notes TEXT NOT NULL DEFAULT '',
-  UNIQUE(physical_device_id, number)
+  UNIQUE(physical_device_id, number, side)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -76,6 +93,7 @@ CREATE TABLE IF NOT EXISTS entities (
   mac_address TEXT,
   hostname TEXT,
   parent_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  vendor TEXT,
   ignored INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
   notes TEXT NOT NULL DEFAULT '',
@@ -88,14 +106,44 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE UNIQUE INDEX IF NOT EXISTS entities_mac_unique
 ON entities(lower(mac_address)) WHERE mac_address IS NOT NULL AND mac_address != '';
 
-CREATE TABLE IF NOT EXISTS port_assignments (
-  port_id TEXT PRIMARY KEY REFERENCES ports(id) ON DELETE CASCADE,
-  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
-  cable_label TEXT NOT NULL DEFAULT '',
-  cable_color TEXT NOT NULL DEFAULT '',
+CREATE TABLE IF NOT EXISTS cables (
+  id TEXT PRIMARY KEY,
+  a_port_id TEXT NOT NULL REFERENCES ports(id) ON DELETE CASCADE,
+  b_port_id TEXT REFERENCES ports(id) ON DELETE CASCADE,
+  b_entity_id TEXT REFERENCES entities(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
+  color TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
-  updated_by TEXT REFERENCES users(id)
+  updated_by TEXT REFERENCES users(id),
+  CHECK ((b_port_id IS NULL) != (b_entity_id IS NULL)),
+  CHECK (b_port_id IS NULL OR a_port_id != b_port_id)
+);
+
+-- Eén kabel per poort en (bewust) één kabel per entity; "poort bezet?" moet in
+-- code beide poortkolommen controleren, deze indexen zijn het vangnet per kolom.
+CREATE UNIQUE INDEX IF NOT EXISTS cables_a_port ON cables(a_port_id);
+CREATE UNIQUE INDEX IF NOT EXISTS cables_b_port ON cables(b_port_id) WHERE b_port_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cables_b_entity ON cables(b_entity_id) WHERE b_entity_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS entity_samples (
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  sampled_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  cpu_percent REAL,
+  memory_percent REAL,
+  latency_ms REAL,
+  PRIMARY KEY(entity_id, sampled_at)
+);
+
+CREATE TABLE IF NOT EXISTS entity_days (
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  day TEXT NOT NULL,
+  samples_total INTEGER NOT NULL DEFAULT 0,
+  samples_up INTEGER NOT NULL DEFAULT 0,
+  flips INTEGER NOT NULL DEFAULT 0,
+  last_change_at TEXT,
+  PRIMARY KEY(entity_id, day)
 );
 
 CREATE TABLE IF NOT EXISTS providers (
@@ -324,11 +372,6 @@ class Database:
     def initialize(self) -> None:
         with self.transaction() as connection:
             connection.executescript(SCHEMA)
-            entity_columns = {row[1] for row in connection.execute("PRAGMA table_info(entities)").fetchall()}
-            if "ignored" not in entity_columns:
-                connection.execute("ALTER TABLE entities ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0")
-            if "archived" not in entity_columns:
-                connection.execute("ALTER TABLE entities ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             inventory_seeded = connection.execute(
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()
@@ -434,6 +477,79 @@ class Database:
                        FROM observations
                      ) WHERE position > 1
                    )"""
+            )
+
+    @staticmethod
+    def current_slot() -> str:
+        now = datetime.now(UTC)
+        return now.replace(minute=now.minute - now.minute % SAMPLE_MINUTES, second=0, microsecond=0).isoformat(timespec="seconds")
+
+    def sample_slot_due(self) -> bool:
+        """Staat er nog niets in het huidige 5-minutenvak?
+
+        De onderhoudslus draait elke 30 seconden; zonder deze check zouden we
+        tien keer per vak alle providerdata parsen om één rij te schrijven.
+        """
+        row = self.fetch_one("SELECT 1 AS n FROM entity_samples WHERE sampled_at=? LIMIT 1", (self.current_slot(),))
+        return row is None
+
+    def record_samples(self, metrics: dict[str, dict[str, Any]] | None = None) -> int:
+        """Leg één meetpunt per entity vast op het 5-minutenraster.
+
+        Fijne samples leven 48 uur, daarboven blijft alleen het dagtotaal over.
+        Zo groeit de historie nooit voorbij het budget in docs/ontwerp-visualisatie.md.
+        """
+        metrics = metrics or {}
+        stamp = self.current_slot()
+        day = stamp[:10]
+        written = 0
+        with self.transaction() as connection:
+            entities = connection.execute("SELECT id,status FROM entities").fetchall()
+            for entity in entities:
+                entity_metrics = metrics.get(entity["id"]) or {}
+                memory_percent = None
+                used, total = entity_metrics.get("memory_used"), entity_metrics.get("memory_total")
+                if isinstance(used, (int, float)) and isinstance(total, (int, float)) and total:
+                    memory_percent = round(used / total * 100, 1)
+                cursor = connection.execute(
+                    """INSERT INTO entity_samples(entity_id,sampled_at,status,cpu_percent,memory_percent,latency_ms)
+                       VALUES(?,?,?,?,?,?) ON CONFLICT(entity_id,sampled_at) DO NOTHING""",
+                    (entity["id"], stamp, entity["status"], _as_number(entity_metrics.get("cpu_percent")),
+                     memory_percent, _as_number(entity_metrics.get("latency_ms"))),
+                )
+                if not cursor.rowcount:
+                    continue
+                written += 1
+                previous = connection.execute(
+                    """SELECT status FROM entity_samples WHERE entity_id=? AND sampled_at<?
+                       ORDER BY sampled_at DESC LIMIT 1""",
+                    (entity["id"], stamp),
+                ).fetchone()
+                flipped = int(bool(previous) and previous["status"] != entity["status"])
+                connection.execute(
+                    """INSERT INTO entity_days(entity_id,day,samples_total,samples_up,flips,last_change_at)
+                       VALUES(?,?,1,?,?,?)
+                       ON CONFLICT(entity_id,day) DO UPDATE SET
+                         samples_total=samples_total+1,
+                         samples_up=samples_up+excluded.samples_up,
+                         flips=flips+excluded.flips,
+                         last_change_at=CASE WHEN excluded.flips=1 THEN excluded.last_change_at ELSE last_change_at END""",
+                    (entity["id"], day, int(entity["status"] == "up"), flipped, stamp if flipped else None),
+                )
+        return written
+
+    def prune_history(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(hours=SAMPLE_RETENTION_HOURS)).isoformat(timespec="seconds")
+        day_cutoff = (datetime.now(UTC) - timedelta(days=DAY_RETENTION_DAYS)).date().isoformat()
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM entity_samples WHERE sampled_at < ?", (cutoff,))
+            connection.execute("DELETE FROM entity_days WHERE day < ?", (day_cutoff,))
+            # Het auditlog groeit anders onbegrensd; de UI toont er 200.
+            connection.execute(
+                """DELETE FROM audit_log WHERE id IN (
+                     SELECT id FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+                   )""",
+                (AUDIT_RETENTION_ROWS,),
             )
 
     def create_backup(self, backup_dir: Path) -> Path:

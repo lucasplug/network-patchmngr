@@ -20,6 +20,9 @@ services:
     build: .
     container_name: patch-manager
     restart: unless-stopped
+    # De app start subprocessen (ping tijdens een scan, librespeed-cli bij een
+    # speedtest); een init-proces ruimt afgebroken kinderen op.
+    init: true
     depends_on:
       patch-manager-init:
         condition: service_completed_successfully
@@ -45,6 +48,12 @@ services:
     volumes:
       - patch-data:/data
       - patch-backups:/backups
+    # Zonder limiet groeit het containerlog onbegrensd op een kleine VM.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   patch-data:

@@ -2,3 +2,4 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["no_admin: start deze test zonder aangemaakte beheerder"]

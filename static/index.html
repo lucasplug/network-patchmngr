@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Network Patch Manager</title>
+  <!-- Inline favicon: scheelt een request en een 404 in het serverlog. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e141c'/%3E%3Crect x='3' y='5' width='2.5' height='6' rx='1' fill='%233ddc97'/%3E%3Crect x='6.75' y='5' width='2.5' height='6' rx='1' fill='%238f7df8'/%3E%3Crect x='10.5' y='5' width='2.5' height='6' rx='1' fill='%23667282'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
@@ -56,8 +58,17 @@
         <div class="heading-actions"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
       </div>
       <div id="summary-chips" class="chips"></div>
-      <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
-      <div id="physical-grid" class="physical-grid"></div>
+      <div class="patch-layout">
+        <div>
+          <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
+          <div id="physical-grid" class="physical-grid"></div>
+        </div>
+        <aside class="unpatched-panel glass" id="unpatched-drop">
+          <div class="side-title">Nog te koppelen <span class="muted" id="unpatched-count"></span></div>
+          <p class="muted tiny">Sleep een device op een poort. Sleep een kabel hierheen om los te koppelen, of klik een device om een poort te kiezen.</p>
+          <div id="unpatched-list" class="chip-list"></div>
+        </aside>
+      </div>
       <div class="section-bar with-space"><span>Handmatige devices</span><span class="muted" id="manual-entity-count"></span></div>
       <div id="manual-entities-list" class="data-list"></div>
     </section>
@@ -73,7 +84,7 @@
       </div>
       <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button class="button hidden" id="group-selection">Selectie groeperen</button><button class="button" id="topology-undo">↶ Ongedaan</button><button class="button" id="add-group">+ Groep</button><button class="button" id="add-relation">+ Relatie</button><button class="button" id="reset-layout">Auto-indeling</button><button class="button primary" id="finish-edit">Klaar</button></div></div>
       <div class="topology-card glass">
-        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><span class="muted">sleepvrij · automatisch ingedeeld</span></div>
+        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><div class="zoom-controls"><button class="icon-button" id="zoom-out" aria-label="Uitzoomen">−</button><span id="zoom-level" class="muted">100%</span><button class="icon-button" id="zoom-in" aria-label="Inzoomen">+</button><button class="button micro" id="zoom-reset">Passend</button></div></div>
         <div class="topology-scroll"><svg id="topology-canvas" viewBox="0 0 1200 760" role="img" aria-label="Netwerktopologie"></svg></div>
       </div>
       <div class="speed-history-card glass" id="speed-history-card">
@@ -87,7 +98,7 @@
       <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".pmbackup,.db,application/zip,application/vnd.sqlite3"></div></div>
       <div class="admin-grid">
         <section class="admin-main">
-          <div class="section-bar"><span>Databronnen</span><span class="muted">read-only adapters</span></div>
+          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
           <div id="providers-grid" class="providers-grid"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
@@ -120,8 +131,10 @@
       <input type="hidden" name="port_id">
       <div class="port-identity"><span id="drawer-device"></span><span id="drawer-speed" class="pill"></span></div>
       <label>Gekoppeld device<select name="entity_id"><option value="">Niet aangesloten</option></select></label>
+      <label>…of doorverbonden naar poort<select name="b_port_id"><option value="">Geen doorverbinding</option></select></label>
       <div class="field-row"><label>Kabellabel<input name="cable_label" placeholder="bijv. C-014"></label><label>Kleur<input name="cable_color" placeholder="bijv. blauw"></label></div>
       <label>Notities<textarea name="notes" rows="4" placeholder="Wandcontactdoos, bestemming, bijzonderheden…"></textarea></label>
+      <div id="drawer-trace" class="drawer-trace"></div>
       <div class="drawer-actions"><button type="button" class="button danger hidden" id="disconnect-port">Loskoppelen</button><button type="submit" class="button primary">Opslaan</button></div>
     </form>
   </aside>
@@ -189,6 +202,80 @@
   <dialog id="merge-dialog" class="modal glass"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
 
   <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
+
+  <div id="entity-drawer-backdrop" class="backdrop hidden"></div>
+  <aside id="entity-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div><p class="eyebrow">Device</p><h2 id="entity-drawer-title">Device</h2><p class="muted tiny" id="entity-drawer-sub"></p></div>
+      <button class="icon-button drawer-close" aria-label="Sluiten">×</button>
+    </div>
+    <div class="drawer-body">
+      <div class="fact-grid" id="entity-drawer-facts"></div>
+      <div id="entity-drawer-cable"></div>
+      <div id="entity-drawer-history"></div>
+    </div>
+  </aside>
+
+  <dialog id="quick-link-dialog" class="modal glass">
+    <form id="quick-link-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Koppelen zonder slepen</p><h2 id="quick-link-title">Device koppelen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="entity_id">
+      <label>Kies een vrije poort<select name="port_id" required></select></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Koppelen</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="wizard-dialog" class="modal wide glass wizard">
+    <div class="modal-head">
+      <div><p class="eyebrow">Eerste inrichting</p><h2 id="wizard-title">Netwerk scannen</h2></div>
+      <button type="button" class="icon-button" id="wizard-close" aria-label="Wizard sluiten">×</button>
+    </div>
+    <ol class="wizard-steps" id="wizard-steps">
+      <li data-step="1">Scannen</li><li data-step="2">Databronnen</li><li data-step="3">Toewijzen</li><li data-step="4">Klaar</li>
+    </ol>
+
+    <section class="wizard-panel" data-panel="1">
+      <p class="muted">Zoek apparaten via de ARP-tabel en een ping-sweep. <strong>Alleen apparaten die aan staan en recent verkeer hadden verschijnen hier</strong> — dit is geen volledige inventaris.</p>
+      <label>Te scannen subnet(ten), komma-gescheiden<input id="wizard-subnets" placeholder="192.168.1.0/24"></label>
+      <p class="muted tiny" id="wizard-subnet-hint"></p>
+      <div class="wizard-actions">
+        <button class="button primary" id="wizard-scan">Scan starten</button>
+        <span class="muted tiny" id="wizard-scan-state"></span>
+      </div>
+      <div id="wizard-scan-results" class="data-list compact-list"></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="2">
+      <p class="muted">Vul in wat je gebruikt en test de verbinding vóór opslaan. Elke bron is overslaanbaar.</p>
+      <div id="wizard-providers" class="wizard-providers"></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="3">
+      <p class="muted">Kies per gevonden apparaat wat ermee moet gebeuren. Standaard blijft alles staan op <em>later beslissen</em>; er wordt niets aangemaakt dat je niet aanvinkt.</p>
+      <div id="wizard-assign" class="assign-list"></div>
+      <div class="wizard-actions"><button class="button primary" id="wizard-apply">Keuzes toepassen</button><span class="muted tiny" id="wizard-apply-state"></span></div>
+    </section>
+
+    <section class="wizard-panel hidden" data-panel="4">
+      <div id="wizard-summary" class="mini-list"></div>
+      <p class="muted tiny">Alles wat de wizard doet kan later ook los: <strong>Admin → Nieuwe apparaten toewijzen</strong>.</p>
+    </section>
+
+    <div class="modal-actions wizard-nav">
+      <button type="button" class="button" id="wizard-back">Terug</button>
+      <button type="button" class="button" id="wizard-skip">Stap overslaan</button>
+      <button type="button" class="button primary" id="wizard-next">Volgende</button>
+    </div>
+  </dialog>
+
+  <dialog id="assign-dialog" class="modal wide glass">
+    <div class="modal-head">
+      <div><p class="eyebrow">Gevonden apparaten</p><h2>Nieuwe apparaten toewijzen</h2></div>
+      <button type="button" class="icon-button modal-close" aria-label="Sluiten">×</button>
+    </div>
+    <div id="assign-standalone" class="assign-list"></div>
+    <div class="modal-actions"><button type="button" class="button modal-close">Sluiten</button><button type="button" class="button primary" id="assign-apply">Keuzes toepassen</button></div>
+  </dialog>
 
   <div id="topology-tooltip" class="topology-tooltip hidden"></div>
 

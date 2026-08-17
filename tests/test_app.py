@@ -1,46 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 import uuid
-from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="plugnet-tests-"))
-os.environ["PATCH_DATA_DIR"] = str(TEST_ROOT / "data")
-os.environ["PATCH_BACKUP_DIR"] = str(TEST_ROOT / "backups")
+from patch_manager.main import app, database, provider_secrets, providers, speedtests
+from patch_manager.db import utcnow
+from patch_manager.speedtest import parse_result
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from patch_manager.main import app, database, provider_secrets, providers, speedtests  # noqa: E402
-from patch_manager.db import utcnow  # noqa: E402
-from patch_manager.speedtest import parse_result  # noqa: E402
+from tests.conftest import CREDENTIALS, TEST_ROOT, setup_admin
 
 
-def setup_admin(client: TestClient) -> str:
-    response = client.post(
-        "/api/auth/setup",
-        json={"username": "lucas", "password": "correct horse battery staple"},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["csrf_token"]
-
-
-@pytest.fixture(autouse=True)
-def isolated_installation(request: pytest.FixtureRequest):
-    for candidate in (database.path, database.path.with_name(database.path.name + "-wal"), database.path.with_name(database.path.name + "-shm")):
-        candidate.unlink(missing_ok=True)
-    for candidate in (TEST_ROOT / "backups").glob("*"):
-        candidate.unlink(missing_ok=True)
-    database.initialize()
-    if request.node.name != "test_initializes_expected_physical_inventory":
-        with TestClient(app) as client:
-            setup_admin(client)
-    yield
-
-
+@pytest.mark.no_admin
 def test_initializes_expected_physical_inventory() -> None:
     with TestClient(app) as client:
         status = client.get("/api/auth/status").json()
@@ -118,13 +91,14 @@ def test_manual_device_can_be_assigned_and_unassigned() -> None:
             json={"name": "NAS", "type": "nas", "ip_address": "192.168.1.20", "notes": ""},
         ).json()
         response = client.put(
-            "/api/ports/switch-01-p1/assignment",
+            "/api/ports/switch-01-p1/cable",
             headers=headers,
-            json={"entity_id": entity["id"], "cable_label": "C-001", "cable_color": "blauw", "notes": ""},
+            json={"b_entity_id": entity["id"], "label": "C-001", "color": "blauw", "notes": ""},
         )
         assert response.status_code == 200, response.text
         assert client.get("/api/bootstrap").json()["counts"]["patched"] == 1
-        response = client.delete("/api/ports/switch-01-p1/assignment", headers=headers)
+        assert client.get("/api/summary").json()["counts"]["patched"] == 1
+        response = client.delete("/api/ports/switch-01-p1/cable", headers=headers)
         assert response.status_code == 200
         assert client.get("/api/bootstrap").json()["counts"]["patched"] == 0
 
@@ -255,15 +229,15 @@ def test_safe_entity_and_physical_device_deletion() -> None:
             json={"name": "Tijdelijk device", "type": "device", "ip_address": "192.168.1.240", "notes": ""},
         ).json()
         assert client.put(
-            "/api/ports/switch-02-p1/assignment", headers=headers,
-            json={"entity_id": entity["id"], "cable_label": "TMP", "cable_color": "", "notes": ""},
+            "/api/ports/switch-02-p1/cable", headers=headers,
+            json={"b_entity_id": entity["id"], "label": "TMP", "color": "", "notes": ""},
         ).status_code == 200
         dns = client.post(
             "/api/dns-records", headers=headers,
             json={"name": "tijdelijk.home.arpa", "record_type": "A", "value": "192.168.1.240", "enabled": True, "entity_id": entity["id"]},
         ).json()
         impact = client.get(f"/api/entities/{entity['id']}/deletion-impact").json()
-        assert impact["counts"]["port_assignments"] == 1
+        assert impact["counts"]["cables"] == 1
         assert impact["counts"]["dns_records"] == 1
         assert client.delete(f"/api/entities/{entity['id']}?confirm=verkeerd", headers=headers).status_code == 422
         deleted = client.delete(
@@ -272,7 +246,7 @@ def test_safe_entity_and_physical_device_deletion() -> None:
         assert deleted.status_code == 200, deleted.text
         assert database.fetch_one("SELECT id FROM entities WHERE id=?", (entity["id"],)) is None
         assert database.fetch_one("SELECT entity_id FROM dns_records WHERE id=?", (dns["id"],))["entity_id"] is None
-        assert database.fetch_one("SELECT port_id FROM port_assignments WHERE port_id='switch-02-p1'") is None
+        assert database.fetch_one("SELECT id FROM cables WHERE a_port_id='switch-02-p1'") is None
 
         # Starter hardware is deliberately removable and must not be reseeded.
         impact = client.get("/api/physical-devices/deco-03/deletion-impact").json()

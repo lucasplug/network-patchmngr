@@ -7,6 +7,44 @@ from typing import Any
 from .db import Database, utcnow
 
 
+MAX_TRACE_HOPS = 10
+
+
+def trace_from_port(
+    port_id: str,
+    ports: dict[str, dict[str, Any]],
+    by_port: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Volg kabels en front/rear-paren tot een device, een los eind of de hoplimiet.
+
+    Elke hop is óf een kabel naar een volgende poort, óf de doorsteek binnen een
+    patchpanel (front↔rear). Eindigt bij een entity-uiteinde of bij niets.
+    """
+    hops: list[dict[str, Any]] = []
+    current = port_id
+    for _ in range(MAX_TRACE_HOPS):
+        cable = by_port.get(current)
+        if not cable:
+            return hops, None
+        if cable["b_entity_id"]:
+            hops.append({"kind": "cable", "cable_id": cable["id"], "entity_id": cable["b_entity_id"]})
+            return hops, cable["b_entity_id"]
+        other = cable["b_port_id"] if cable["a_port_id"] == current else cable["a_port_id"]
+        if not other:
+            return hops, None
+        hops.append({"kind": "cable", "cable_id": cable["id"], "from_port_id": current, "port_id": other})
+        peer = (ports.get(other) or {}).get("peer_port_id")
+        if not peer:
+            return hops, None
+        hops.append({"kind": "through", "port_id": other, "peer_port_id": peer})
+        current = peer
+    return hops, None
+
+
+def trace_entity(port_id: str, ports: dict[str, dict[str, Any]], by_port: dict[str, dict[str, Any]]) -> str | None:
+    return trace_from_port(port_id, ports, by_port)[1]
+
+
 def sync_topology_catalog(database: Database) -> None:
     """Project inventory into topology nodes without touching manual layout."""
     now = utcnow()
@@ -43,20 +81,29 @@ def sync_topology_catalog(database: Database) -> None:
                  parent_node_id, "auto", 40 + (index % 5) * 220, 390 + (index // 5) * 90, 180, 58, now, now),
             )
 
-        # Patch relations are fully derived. They may disappear when a port is
-        # unassigned, but manual relations remain untouched.
+        # Patch relations are fully derived from the cable graph. A device port
+        # whose trace ends at an entity becomes one relation; intermediate patch
+        # panels are traversed, not drawn. Manual relations stay untouched.
         connection.execute("DELETE FROM topology_relations WHERE source='patch'")
-        assignments = connection.execute(
-            """SELECT pa.port_id,pa.entity_id,p.physical_device_id,p.label
-               FROM port_assignments pa JOIN ports p ON p.id=pa.port_id"""
-        ).fetchall()
-        for assignment in assignments:
+        ports = {row["id"]: dict(row) for row in connection.execute("SELECT * FROM ports").fetchall()}
+        cables = [dict(row) for row in connection.execute("SELECT * FROM cables").fetchall()]
+        by_port: dict[str, dict[str, Any]] = {}
+        for cable in cables:
+            by_port[cable["a_port_id"]] = cable
+            if cable["b_port_id"]:
+                by_port[cable["b_port_id"]] = cable
+        for port_id, port in ports.items():
+            if port["side"] != "front" or port_id not in by_port:
+                continue
+            entity_id = trace_entity(port_id, ports, by_port)
+            if not entity_id:
+                continue
             connection.execute(
                 """INSERT OR REPLACE INTO topology_relations
                    (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
                    VALUES(?,?,?,?,?,'patch',1,?,?)""",
-                (f"patch:{assignment['port_id']}", f"physical:{assignment['physical_device_id']}",
-                 f"entity:{assignment['entity_id']}", "physical", assignment["label"], now, now),
+                (f"patch:{port_id}", f"physical:{port['physical_device_id']}",
+                 f"entity:{entity_id}", "physical", port["label"], now, now),
             )
 
 
