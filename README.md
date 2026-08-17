@@ -24,6 +24,18 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager, elk met een testverbinding die vóór opslaan laat zien wat hij zou vinden.
 - Vendorherkenning van gevonden apparaten via een lokaal IEEE OUI-bestand in de image — geen enkele externe lookup.
 
+## Starten via Portainer (aanbevolen)
+
+De image wordt bij elke push naar `main` automatisch gepubliceerd naar
+`ghcr.io/lucasplug/network-patchmngr:latest`. In Portainer hoef je dus niets te
+bouwen: **Stacks → Add stack → Web editor**, plak de inhoud van
+[`docker-compose.portainer.yml`](docker-compose.portainer.yml) en pas de
+omgevingsvariabelen aan (in elk geval `PATCH_TRUSTED_SUBNETS`).
+
+Is het GHCR-pakket privé, zet het dan eenmalig op *Public* onder
+**GitHub → Packages → network-patchmngr → Package settings**, of geef Portainer
+een registry-token mee.
+
 ## Starten met Docker Compose
 
 ```bash
