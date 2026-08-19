@@ -34,6 +34,24 @@ def _as_number(value: Any) -> float | None:
         return None
 
 
+# Apart, omdat migratie 002 deze tabel opnieuw opbouwt: één definitie, geen
+# tweede kopie die stilletjes uit de pas kan lopen.
+PROVIDERS_TABLE = """CREATE TABLE IF NOT EXISTS providers (
+  id TEXT PRIMARY KEY,
+  -- Bewust niet uniek: je kunt twee Portainers of twee AdGuards hebben. De
+  -- adapters kiezen op type, de instellingen en geheimen hangen aan het id.
+  type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  last_run_at TEXT,
+  last_success_at TEXT,
+  last_error TEXT,
+  updated_at TEXT NOT NULL
+);
+"""
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -66,6 +84,10 @@ CREATE TABLE IF NOT EXISTS physical_devices (
   location TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   position INTEGER NOT NULL DEFAULT 0,
+  -- Welke observatie vertelt of dít apparaat aan staat. Een switch draait geen
+  -- agent, maar is wel te pingen: koppel de Uptime Kuma-monitor of de
+  -- ping-discovery van zijn beheer-IP en het apparaat krijgt diens status.
+  monitor_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -93,6 +115,10 @@ CREATE TABLE IF NOT EXISTS entities (
   mac_address TEXT,
   hostname TEXT,
   parent_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  -- Hangt aan dit netwerkapparaat zonder dat er een poort bij hoort: een
+  -- wifi-client op een Deco, of een switchpoort die je (nog) niet weet. Een
+  -- echte kabel blijft een rij in `cables`; die wint bij het tekenen.
+  uplink_device_id TEXT REFERENCES physical_devices(id) ON DELETE SET NULL,
   vendor TEXT,
   ignored INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
@@ -146,18 +172,23 @@ CREATE TABLE IF NOT EXISTS entity_days (
   PRIMARY KEY(entity_id, day)
 );
 
-CREATE TABLE IF NOT EXISTS providers (
+CREATE TABLE IF NOT EXISTS app_links (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 0,
-  poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
-  config_json TEXT NOT NULL DEFAULT '{}',
-  last_run_at TEXT,
-  last_success_at TEXT,
-  last_error TEXT,
+  url TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  icon TEXT NOT NULL DEFAULT '',
+  group_name TEXT NOT NULL DEFAULT '',
+  -- Dezelfde constructie als bij netwerkapparaten: een app heeft geen eigen
+  -- status, maar leent die van de observatie die erover gaat -- in de praktijk
+  -- een Uptime Kuma-monitor.
+  monitor_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+""" + PROVIDERS_TABLE + """
 
 CREATE TABLE IF NOT EXISTS provider_secrets (
   provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
@@ -327,18 +358,88 @@ CREATE TABLE IF NOT EXISTS speedtest_runs (
 """
 
 
+# ---------------------------------------------------------------- migraties
+# Verhoog SCHEMA_VERSION bij elke wijziging aan SCHEMA die een bestaande
+# database raakt, en zet de bijbehorende stap in MIGRATIONS. Een nieuwe tabel
+# hoeft geen stap: CREATE TABLE IF NOT EXISTS regelt die zelf.
+SCHEMA_VERSION = 2
+
+
+def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in connection.execute(f"PRAGMA table_info({table})"))
+
+
+def _add_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """ALTER TABLE ADD COLUMN, maar overslaan als de kolom er al is.
+
+    Nodig omdat een database die al met een nieuwere SCHEMA is aangemaakt de
+    kolom kan hebben zonder dat user_version dat weet.
+    """
+    if not _has_column(connection, table, column):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migration_002(connection: sqlite3.Connection) -> None:
+    """Uplinks, statusmonitors, meerdere bronnen per type, en de ONT."""
+    _add_column(connection, "entities", "uplink_device_id",
+                "TEXT REFERENCES physical_devices(id) ON DELETE SET NULL")
+    _add_column(connection, "physical_devices", "monitor_entity_id",
+                "TEXT REFERENCES entities(id) ON DELETE SET NULL")
+
+    # De UNIQUE op providers.type is een impliciete index die je niet kunt
+    # droppen; in SQLite betekent dat de tabel opnieuw opbouwen.
+    unique_type = any(
+        row[1].startswith("sqlite_autoindex_providers")
+        for row in connection.execute("PRAGMA index_list(providers)")
+    )
+    if unique_type:
+        connection.execute("ALTER TABLE providers RENAME TO providers_old")
+        connection.executescript(PROVIDERS_TABLE)
+        connection.execute(
+            """INSERT INTO providers(id,type,name,enabled,poll_interval_seconds,config_json,
+                                     last_run_at,last_success_at,last_error,updated_at)
+               SELECT id,type,name,enabled,poll_interval_seconds,config_json,
+                      last_run_at,last_success_at,last_error,updated_at FROM providers_old"""
+        )
+        connection.execute("DROP TABLE providers_old")
+
+    # De inventarisseed draait alleen bij een lege installatie, dus een
+    # bestaande database krijgt de ONT hier.
+    if not connection.execute("SELECT 1 FROM physical_devices WHERE id='ont-01'").fetchone():
+        now = utcnow()
+        connection.execute(
+            """INSERT INTO physical_devices(id,name,type,model,position,created_at,updated_at)
+               VALUES('ont-01','Glasvezel-ONT','ont','',99,?,?)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO ports(id,physical_device_id,number,label,speed_mbps)
+               VALUES('ont-01-p1','ont-01',1,'Poort 1',1000)"""
+        )
+
+
+MIGRATIONS = {2: _migration_002}
+
+
 DEVICE_TEMPLATES = [
     ("switch-01", "TP-Link SG108E 01", "switch", "TP-Link SG108E", 8, [1000] * 8),
     ("switch-02", "TP-Link SG108E 02", "switch", "TP-Link SG108E", 8, [1000] * 8),
     ("deco-01", "Deco XE75 Pro 01", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
     ("deco-02", "Deco XE75 Pro 02", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
     ("deco-03", "Deco XE75 Pro 03", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
+    # De glasvezelaansluiting. Waar de LAN-poort heen gaat weet alleen jij, dus
+    # die kabel trek je zelf in de patchview.
+    ("ont-01", "Glasvezel-ONT", "ont", "", 1, [1000]),
 ]
 
 PROVIDER_TEMPLATES = [
     ("dhcp-arp", "dhcp_arp", "DHCP / ARP discovery", 300, {"subnets": ["192.168.1.0/24"], "scan": True}),
     ("uptime-kuma", "uptime_kuma", "Uptime Kuma", 60, {"base_url": "", "status_page_slug": "homelab"}),
-    ("glances", "glances", "Glances", 60, {"endpoints": [{"name": "docker-vm", "url": "http://192.168.1.12:61208/api/4"}]}),
+    # entity_id per endpoint: Glances draait op meerdere machines en de
+    # hostnaam die het teruggeeft komt niet altijd overeen met hoe het
+    # apparaat hier heet. Daarom wijs je het device zelf aan; matchen op
+    # hostnaam leverde dubbele hosts op.
+    ("glances", "glances", "Glances", 60, {"endpoints": [{"name": "docker-vm", "url": "http://192.168.1.12:61208/api/4", "entity_id": None}]}),
     ("portainer", "portainer", "Portainer", 60, {"base_url": "https://192.168.1.12:9443", "verify_tls": False}),
     ("proxmox", "proxmox", "Proxmox VE", 60, {"base_url": "https://192.168.1.100:8006", "user": "readonly@pve", "token_name": "patchmanager", "verify_tls": False}),
     ("adguard", "adguard", "AdGuard Home", 300, {"base_url": "http://192.168.1.12:3000", "import_clients": True, "import_rewrites": True, "verify_tls": True}),
@@ -371,7 +472,11 @@ class Database:
 
     def initialize(self) -> None:
         with self.transaction() as connection:
+            fresh = connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0] == 0
             connection.executescript(SCHEMA)
+            self._migrate(connection, fresh)
             inventory_seeded = connection.execute(
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()
@@ -394,6 +499,30 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO app_meta(key,value) VALUES('app_title','Network Patch Manager')"
             )
+
+    def _migrate(self, connection: sqlite3.Connection, fresh: bool) -> None:
+        """Breng een bestaande database naar de huidige SCHEMA_VERSION.
+
+        `CREATE TABLE IF NOT EXISTS` maakt nieuwe tabellen wel aan, maar raakt
+        een bestaande tabel niet meer aan. Nieuwe kolommen en gewijzigde
+        constraints moeten dus hier. Een verse database heeft alles al uit
+        SCHEMA en wordt meteen op de huidige versie gezet; migraties draaien
+        daar niet, want die zouden op reeds bestaande kolommen stuklopen.
+        """
+        current = connection.execute("PRAGMA user_version").fetchone()[0]
+        if fresh:
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            return
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database is van een nieuwere versie ({current}) dan deze app ({SCHEMA_VERSION}); "
+                "start de vorige image of zet een back-up terug."
+            )
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            step = MIGRATIONS.get(version)
+            if step:
+                step(connection)
+            connection.execute(f"PRAGMA user_version={version}")
 
     def _seed_physical_devices(self, connection: sqlite3.Connection) -> None:
         now = utcnow()
@@ -428,16 +557,20 @@ class Database:
                VALUES('special:internet','special','internet','internet','','external',510,24,150,52,1,?,?)""",
             (now, now),
         )
+        # Het internet komt binnen op de ONT, niet op een losse 'router'-knoop.
+        # Die knoop was een kopie van een Deco die nergens aan vastzat.
+        # De knoop moet er staan vóór de relatie: topology_relations verwijst
+        # ernaar, en sync_topology_catalog draait pas na het seeden.
         connection.execute(
             """INSERT OR IGNORE INTO topology_nodes
                (id,reference_type,reference_id,label,subtitle,node_type,x,y,width,height,manual_position,created_at,updated_at)
-               VALUES('special:router','special','router','router','Deco XE75 Pro','router',490,116,190,62,1,?,?)""",
+               VALUES('physical:ont-01','physical','ont-01','Glasvezel-ONT','','ont',510,116,190,62,1,?,?)""",
             (now, now),
         )
         connection.execute(
             """INSERT OR IGNORE INTO topology_relations
                (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
-               VALUES('manual:internet-router','special:internet','special:router','uplink','','manual',1,?,?)""",
+               VALUES('manual:internet-ont','special:internet','physical:ont-01','uplink','glasvezel','manual',1,?,?)""",
             (now, now),
         )
 

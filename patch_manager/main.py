@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -12,7 +14,7 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +23,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__
-from .db import Database, expires_in, utcnow
-from .providers import ProviderManager
+from . import __version__, categories
+from .db import PROVIDER_TEMPLATES, Database, expires_in, utcnow
+from .providers import ProviderManager, normalize_mac
 from .secret_store import SecretStore
 from .security import hash_password, new_token, token_digest, verify_password
 from .settings import get_settings
@@ -74,6 +76,12 @@ class Credentials(BaseModel):
     password: str = Field(min_length=12, max_length=256)
 
 
+class UplinkInput(BaseModel):
+    """Aan welk netwerkapparaat iets hangt zonder dat er een poort bij hoort."""
+
+    physical_device_id: str | None = Field(default=None, max_length=64)
+
+
 class EntityInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     type: str = Field(default="device", max_length=40)
@@ -90,6 +98,9 @@ class PhysicalDeviceInput(BaseModel):
     location: str = Field(default="", max_length=100)
     notes: str = Field(default="", max_length=2000)
     ports: int = Field(default=1, ge=1, le=96)
+    # De observatie die vertelt of dit apparaat aan staat; een switch draait
+    # geen agent maar is wel te pingen of te monitoren.
+    monitor_entity_id: str | None = Field(default=None, max_length=64)
 
 
 class CableInput(BaseModel):
@@ -117,11 +128,30 @@ class PortInput(BaseModel):
 
 
 class ProviderInput(BaseModel):
+    # Met twee Portainers moet je ze uit elkaar kunnen houden.
+    name: str | None = Field(default=None, max_length=100)
     enabled: bool
     poll_interval_seconds: int = Field(ge=15, le=86400)
     config: dict[str, Any]
     credentials: dict[str, str | None] = Field(default_factory=dict)
     clear_credentials: list[str] = Field(default_factory=list)
+
+
+class AppLinkInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=200)
+    icon: str = Field(default="", max_length=8)
+    group_name: str = Field(default="", max_length=60)
+    monitor_entity_id: str | None = Field(default=None, max_length=64)
+    position: int = Field(default=0, ge=0, le=999)
+
+
+class ProviderCreateInput(BaseModel):
+    """Een tweede omgeving van een soort die je al hebt."""
+
+    type: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=100)
 
 
 class AppSettingsInput(BaseModel):
@@ -233,6 +263,20 @@ PROVIDER_CREDENTIAL_FIELDS: dict[str, list[dict[str, str]]] = {
     ],
     "proxmox": [
         {"key": "token_secret", "label": "API-tokengeheim", "type": "password"},
+    ],
+}
+
+# Configuratie die de wizard náást de basis-URL moet uitvragen. Zonder dit
+# stuurt de wizard de sjabloonwaarden uit db.py mee en krijg je een 401 op een
+# token dat je nooit hebt kunnen invullen. Providers die genoeg hebben aan een
+# URL staan hier niet in.
+PROVIDER_CONFIG_FIELDS: dict[str, list[dict[str, str]]] = {
+    "proxmox": [
+        {"key": "user", "label": "Gebruiker (user@realm)", "placeholder": "root@pam"},
+        {"key": "token_name", "label": "Token-ID (deel na de !)", "placeholder": "patchmanager"},
+    ],
+    "uptime_kuma": [
+        {"key": "status_page_slug", "label": "Statuspagina-slug", "placeholder": "homelab"},
     ],
 }
 
@@ -452,6 +496,7 @@ def serialize_provider(row: dict[str, Any]) -> dict[str, Any]:
     fields = PROVIDER_CREDENTIAL_FIELDS.get(row["type"], [])
     configured = provider_secrets.get(row["id"])
     row["credential_fields"] = fields
+    row["config_fields"] = PROVIDER_CONFIG_FIELDS.get(row["type"], [])
     row["credentials_configured"] = {field["key"]: field["key"] in configured for field in fields}
     return row
 
@@ -511,8 +556,18 @@ def nested_physical_devices() -> list[dict[str, Any]]:
         port["ip_address"] = entity["ip_address"] if entity else None
         port["hostname"] = entity["hostname"] if entity else None
         by_device.setdefault(port["physical_device_id"], []).append(port)
+    monitors = {
+        row["id"]: row
+        for row in database.fetch_all("SELECT id,name,status,status_updated_at FROM entities")
+    }
     for device in devices:
         device["ports"] = by_device.get(device["id"], [])
+        # Een netwerkapparaat heeft geen eigen status; die leent het van de
+        # observatie die erover gaat. Zonder koppeling blijft dat 'unknown'.
+        monitor = monitors.get(device["monitor_entity_id"])
+        device["status"] = monitor["status"] if monitor else "unknown"
+        device["status_updated_at"] = monitor["status_updated_at"] if monitor else None
+        device["monitor_name"] = monitor["name"] if monitor else None
     return devices
 
 
@@ -522,14 +577,21 @@ def inventory_counts() -> dict[str, Any]:
         for row in database.fetch_all("SELECT b_entity_id FROM cables WHERE b_entity_id IS NOT NULL")
     }
     open_discoveries = database.fetch_all(
-        "SELECT id FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"
+        """SELECT id,uplink_device_id,
+                  (SELECT COUNT(*) FROM physical_devices d WHERE d.monitor_entity_id=entities.id) AS monitors
+           FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"""
     )
     return {
         "ports": database.fetch_one("SELECT COUNT(*) AS n FROM ports WHERE side='front'")["n"],
         "patched": database.fetch_one("SELECT COUNT(*) AS n FROM cables")["n"],
         "up": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='up'")["n"],
         "down": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='down'")["n"],
-        "unlinked": sum(1 for row in open_discoveries if row["id"] not in linked),
+        # Een monitor die de status van een netwerkapparaat levert heeft ook
+        # een plek gekregen, al hangt hij nergens aan een poort.
+        "unlinked": sum(
+            1 for row in open_discoveries
+            if row["id"] not in linked and not row["uplink_device_id"] and not row["monitors"]
+        ),
         "conflicts": database.fetch_one("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'")["n"],
     }
 
@@ -546,6 +608,8 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     counts = inventory_counts()
     return {
         "site": {"title": app_title(), "timezone": "Europe/Amsterdam"},
+        "categories": categories.payload(),
+        "app_links": serialize_app_links(),
         "counts": counts,
         "physical_devices": nested_physical_devices(),
         "entities": entities,
@@ -584,6 +648,9 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     """Licht poll-endpoint: statussen en tellers, geen volledige inventaris."""
     return {
         "counts": inventory_counts(),
+        # De appstatus komt van dezelfde entities, maar het dashboard wil de
+        # tegels los kunnen bijwerken zonder een volledige bootstrap.
+        "app_links": serialize_app_links(),
         "entities": database.fetch_all(
             "SELECT id,status,status_updated_at,last_seen_at FROM entities"
         ),
@@ -600,6 +667,24 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
             ),
         },
     }
+
+
+@app.get("/api/physical-devices/{device_id}/history")
+def physical_device_history(device_id: str, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    """De historie van het apparaat is die van zijn statusmonitor.
+
+    Een switch levert zelf niets aan; de observatie die erover gaat wél. Zonder
+    koppeling is er dus niets te tonen, en dat zeggen we ook.
+    """
+    device = database.fetch_one(
+        "SELECT id,name,monitor_entity_id FROM physical_devices WHERE id=?", (device_id,)
+    )
+    if not device:
+        raise HTTPException(404, "Netwerkapparaat niet gevonden")
+    if not device["monitor_entity_id"]:
+        return {"monitor_entity_id": None, "days": [], "samples": []}
+    history = entity_history(device["monitor_entity_id"])
+    return {"monitor_entity_id": device["monitor_entity_id"], **history}
 
 
 @app.get("/api/entities/{entity_id}/history")
@@ -665,6 +750,147 @@ def wizard_state(payload: WizardStateInput, auth: AuthContext = Depends(write_au
     return {"dismissed": payload.dismissed}
 
 
+CSV_COLUMNS = ("name", "type", "ip_address", "mac_address", "hostname", "notes")
+
+
+@app.post("/api/entities/import-csv")
+async def import_entities_csv(
+    file: UploadFile = File(...), auth: AuthContext = Depends(write_auth)
+) -> dict[str, Any]:
+    """Handmatige devices in bulk, voor de eerste vulling.
+
+    Bewust alleen aanmaken en bijwerken, nooit verwijderen: een half bestand
+    mag je inventaris niet leegmaken. Rijen die niet kloppen worden benoemd in
+    plaats van stil overgeslagen.
+    """
+    raw = (await file.read(1_000_000)).decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(raw))
+    if not reader.fieldnames or "name" not in [name.strip().lower() for name in reader.fieldnames]:
+        raise HTTPException(422, f"Eerste regel moet kolomnamen bevatten, met minimaal 'name'. Toegestaan: {', '.join(CSV_COLUMNS)}")
+    created = updated = 0
+    problems: list[str] = []
+    for number, row in enumerate(reader, start=2):
+        values = {
+            key.strip().lower(): (value or "").strip()
+            for key, value in row.items() if key and key.strip().lower() in CSV_COLUMNS
+        }
+        name = values.get("name", "")
+        if not name:
+            problems.append(f"regel {number}: geen naam")
+            continue
+        mac = normalize_mac(values.get("mac_address")) if values.get("mac_address") else None
+        if values.get("mac_address") and not mac:
+            problems.append(f"regel {number}: '{values['mac_address']}' is geen MAC-adres")
+            continue
+        kind = categories.normalize(values.get("type") or "device")
+        # Op MAC bijwerken, anders op naam: hetzelfde bestand twee keer
+        # inlezen mag geen dubbele apparaten opleveren.
+        existing = None
+        if mac:
+            existing = database.fetch_one("SELECT id FROM entities WHERE lower(mac_address)=?", (mac,))
+        if not existing:
+            existing = database.fetch_one(
+                "SELECT id FROM entities WHERE origin='manual' AND lower(name)=lower(?)", (name,)
+            )
+        now = utcnow()
+        with database.transaction() as connection:
+            if existing:
+                connection.execute(
+                    """UPDATE entities SET type=?,ip_address=COALESCE(?,ip_address),
+                       mac_address=COALESCE(?,mac_address),hostname=COALESCE(?,hostname),
+                       notes=CASE WHEN ?!='' THEN ? ELSE notes END,updated_at=? WHERE id=?""",
+                    (kind, values.get("ip_address") or None, mac, values.get("hostname") or None,
+                     values.get("notes", ""), values.get("notes", ""), now, existing["id"]),
+                )
+                updated += 1
+            else:
+                connection.execute(
+                    """INSERT INTO entities(id,name,type,origin,status,ip_address,mac_address,hostname,
+                                            notes,created_at,updated_at)
+                       VALUES(?,?,?,'manual','unknown',?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), name, kind, values.get("ip_address") or None, mac,
+                     values.get("hostname") or None, values.get("notes", ""), now, now),
+                )
+                created += 1
+    database.audit(auth.user_id, "entity.import_csv", "entity", None, {"created": created, "updated": updated})
+    return {"created": created, "updated": updated, "problems": problems[:20]}
+
+
+@app.get("/api/search")
+def search(q: str, _: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
+    """Eén zoekveld over alles wat een naam of adres heeft.
+
+    Bewust geen fuzzy matching of scoring: bij deze omvang is een
+    substring-treffer per kolom precies genoeg, en je kunt zien waaróm iets
+    matcht.
+    """
+    term = q.strip()
+    if len(term) < 2:
+        return []
+    like = f"%{term.lower()}%"
+    results: list[dict[str, Any]] = []
+    for row in database.fetch_all(
+        """SELECT id,name,type,origin,status,ip_address,mac_address,hostname FROM entities
+           WHERE archived=0 AND (lower(name) LIKE ? OR lower(COALESCE(ip_address,'')) LIKE ?
+                 OR lower(COALESCE(mac_address,'')) LIKE ? OR lower(COALESCE(hostname,'')) LIKE ?)
+           ORDER BY origin,name LIMIT 25""",
+        (like, like, like, like),
+    ):
+        results.append({
+            "kind": "entity", "id": row["id"], "label": row["name"],
+            "sub": row["ip_address"] or row["hostname"] or categories.label_for(row["type"]),
+            "status": row["status"], "goto": "patch",
+        })
+    for row in database.fetch_all(
+        """SELECT id,name,type,model,location FROM physical_devices
+           WHERE lower(name) LIKE ? OR lower(model) LIKE ? OR lower(location) LIKE ?
+           ORDER BY position LIMIT 25""",
+        (like, like, like),
+    ):
+        results.append({
+            "kind": "physical", "id": row["id"], "label": row["name"],
+            "sub": row["model"] or categories.label_for(row["type"]), "goto": "patch",
+        })
+    for row in database.fetch_all(
+        """SELECT id,name,url,group_name FROM app_links
+           WHERE lower(name) LIKE ? OR lower(url) LIKE ? OR lower(group_name) LIKE ?
+           ORDER BY name LIMIT 25""",
+        (like, like, like),
+    ):
+        results.append({
+            "kind": "app", "id": row["id"], "label": row["name"],
+            "sub": row["url"], "goto": "apps",
+        })
+    return results
+
+
+@app.get("/api/changes")
+def changes(days: int = 7, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    """Wat is er sinds kort verschenen of verdwenen.
+
+    De auditlog vertelt wat jíj hebt gedaan; dit vertelt wat het netwerk deed.
+    Beide velden bestonden al, ze werden alleen nergens naast elkaar gezet.
+    """
+    days = max(1, min(days, 90))
+    since = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+    appeared = database.fetch_all(
+        """SELECT id,name,type,ip_address,mac_address,vendor,origin,first_seen_at
+           FROM entities WHERE archived=0 AND first_seen_at IS NOT NULL AND first_seen_at>=?
+           ORDER BY first_seen_at DESC LIMIT 50""",
+        (since,),
+    )
+    # 'Verdwenen' is niet hetzelfde als 'down': dit zijn dingen waar al een tijd
+    # geen enkele bron meer iets over gezegd heeft.
+    vanished = database.fetch_all(
+        """SELECT id,name,type,ip_address,mac_address,vendor,origin,last_seen_at,status
+           FROM entities WHERE archived=0 AND ignored=0 AND last_seen_at IS NOT NULL
+             AND last_seen_at<? AND status!='up'
+           ORDER BY last_seen_at DESC LIMIT 50""",
+        (since,),
+    )
+    return {"days": days, "since": since, "appeared": appeared, "vanished": vanished}
+
+
 @app.get("/api/discoveries")
 def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
     """Open discoveries voor het bulk-toewijsscherm (ook los van de wizard)."""
@@ -674,15 +900,20 @@ def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
     }
     rows = database.fetch_all(
         """SELECT e.id,e.name,e.type,e.status,e.ip_address,e.mac_address,e.hostname,e.vendor,
-                  e.first_seen_at,e.last_seen_at,
+                  e.first_seen_at,e.last_seen_at,e.uplink_device_id,d.name AS uplink_device_name,
+                  d.type AS uplink_device_type,
+                  (SELECT m.name FROM physical_devices m WHERE m.monitor_entity_id=e.id) AS monitor_for,
                   (SELECT GROUP_CONCAT(p.name,', ') FROM provider_records pr
                      JOIN providers p ON p.id=pr.provider_id WHERE pr.entity_id=e.id) AS sources
            FROM entities e
+           LEFT JOIN physical_devices d ON d.id=e.uplink_device_id
            WHERE e.origin='discovered' AND e.ignored=0 AND e.archived=0
            ORDER BY e.first_seen_at DESC,e.name"""
     )
     for row in rows:
-        row["linked"] = row["id"] in linked
+        # Een poortloze uplink telt net zo goed als toegewezen: het ding heeft
+        # een plek gekregen, alleen zonder kabel.
+        row["linked"] = row["id"] in linked or bool(row["uplink_device_id"]) or bool(row["monitor_for"])
     return rows
 
 
@@ -737,6 +968,39 @@ def update_entity(entity_id: str, payload: EntityInput, auth: AuthContext = Depe
              payload.mac_address.lower() if payload.mac_address else None, payload.hostname, payload.notes, utcnow(), entity_id),
         )
     database.audit(auth.user_id, "entity.update", "entity", entity_id, payload.model_dump())
+    return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+
+
+@app.put("/api/entities/{entity_id}/uplink")
+def set_entity_uplink(entity_id: str, payload: UplinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Hang een device aan een netwerkapparaat zonder poort (wifi, of poort onbekend).
+
+    Een echte kabel blijft de sterkere koppeling: bestaat die al, dan zou een
+    uplink ernaast alleen maar verwarren.
+    """
+    entity = database.fetch_one("SELECT id,type FROM entities WHERE id=?", (entity_id,))
+    if not entity:
+        raise HTTPException(404, "Device niet gevonden")
+    device_id = (payload.physical_device_id or "").strip() or None
+    if device_id and not categories.can_attach(entity["type"]):
+        raise HTTPException(
+            409,
+            f"Een {categories.label_for(entity['type']).lower()} heeft geen netwerkpoort; "
+            "koppel de host waarop het draait.",
+        )
+    if device_id:
+        device = database.fetch_one("SELECT id FROM physical_devices WHERE id=?", (device_id,))
+        if not device:
+            raise HTTPException(404, "Netwerkapparaat niet gevonden")
+        cable = database.fetch_one("SELECT id FROM cables WHERE b_entity_id=?", (entity_id,))
+        if cable:
+            raise HTTPException(409, "Dit device zit al met een kabel op een poort; koppel die eerst los")
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE entities SET uplink_device_id=?,updated_at=? WHERE id=?",
+            (device_id, utcnow(), entity_id),
+        )
+    database.audit(auth.user_id, "entity.uplink", "entity", entity_id, {"physical_device_id": device_id})
     return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
 
 
@@ -848,6 +1112,14 @@ def delete_entity(entity_id: str, confirm: str, auth: AuthContext = Depends(writ
     return {"ok": True}
 
 
+def resolve_monitor(entity_id: str | None) -> str | None:
+    """De entity waarvan een netwerkapparaat zijn status leent."""
+    entity_id = (entity_id or "").strip() or None
+    if entity_id and not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Statusmonitor niet gevonden")
+    return entity_id
+
+
 def create_device_ports(connection: sqlite3.Connection, device_id: str, device_type: str, first: int, last: int) -> None:
     for number in range(first, last + 1):
         if device_type == "patch_panel":
@@ -875,9 +1147,10 @@ def create_physical_device(payload: PhysicalDeviceInput, auth: AuthContext = Dep
     position = database.fetch_one("SELECT COALESCE(MAX(position),-1)+1 AS n FROM physical_devices")["n"]
     with database.transaction() as connection:
         connection.execute(
-            """INSERT INTO physical_devices(id,name,type,model,location,notes,position,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, position, now, now),
+            """INSERT INTO physical_devices(id,name,type,model,location,notes,position,monitor_entity_id,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes,
+             position, resolve_monitor(payload.monitor_entity_id), now, now),
         )
         create_device_ports(connection, device_id, payload.type, 1, payload.ports)
     database.audit(auth.user_id, "physical_device.create", "physical_device", device_id, payload.model_dump())
@@ -906,8 +1179,9 @@ def update_physical_device(device_id: str, payload: PhysicalDeviceInput, auth: A
     now = utcnow()
     with database.transaction() as connection:
         connection.execute(
-            "UPDATE physical_devices SET name=?,type=?,model=?,location=?,notes=?,updated_at=? WHERE id=?",
-            (payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, now, device_id),
+            "UPDATE physical_devices SET name=?,type=?,model=?,location=?,notes=?,monitor_entity_id=?,updated_at=? WHERE id=?",
+            (payload.name.strip(), payload.type, payload.model, payload.location, payload.notes,
+             resolve_monitor(payload.monitor_entity_id), now, device_id),
         )
         if payload.ports < port_count:
             connection.execute("DELETE FROM ports WHERE physical_device_id=? AND number>?", (device_id, payload.ports))
@@ -996,6 +1270,12 @@ def insert_cable(payload: CableInput, user_id: str) -> dict[str, Any]:
             (cable_id, payload.a_port_id, payload.b_port_id, payload.b_entity_id,
              payload.label, payload.color, payload.notes, utcnow(), user_id),
         )
+        # Een kabel is preciezer dan "hangt ergens aan": de losse uplink zou
+        # er alleen naast blijven staan en tegenspreken waar het ding zit.
+        if payload.b_entity_id:
+            connection.execute(
+                "UPDATE entities SET uplink_device_id=NULL WHERE id=?", (payload.b_entity_id,)
+            )
     return database.fetch_one("SELECT * FROM cables WHERE id=?", (cable_id,))
 
 
@@ -1058,6 +1338,114 @@ def port_cable_clear(port_id: str, auth: AuthContext = Depends(write_auth)) -> d
     return {"ok": True}
 
 
+def app_link_url(value: str) -> str:
+    """Alleen http(s).
+
+    Een tegel is een <a href>; zonder deze controle kun je javascript: in je
+    eigen dashboard zetten, en dat draait dan met je sessie erbij.
+    """
+    url = value.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(422, "Een link moet met http:// of https:// beginnen")
+    return url
+
+
+def serialize_app_links() -> list[dict[str, Any]]:
+    return database.fetch_all(
+        """SELECT a.*, e.name AS monitor_name, COALESCE(e.status,'unknown') AS status,
+                  e.status_updated_at
+           FROM app_links a LEFT JOIN entities e ON e.id=a.monitor_entity_id
+           ORDER BY a.group_name, a.position, a.name"""
+    )
+
+
+@app.post("/api/app-links")
+def create_app_link(payload: AppLinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    link_id = str(uuid.uuid4())
+    now = utcnow()
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO app_links(id,name,url,description,icon,group_name,monitor_entity_id,position,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (link_id, payload.name.strip(), app_link_url(payload.url), payload.description,
+             payload.icon.strip(), payload.group_name.strip(),
+             resolve_monitor(payload.monitor_entity_id), payload.position, now, now),
+        )
+    database.audit(auth.user_id, "app_link.create", "app_link", link_id, {"name": payload.name})
+    return database.fetch_one("SELECT * FROM app_links WHERE id=?", (link_id,))
+
+
+@app.patch("/api/app-links/{link_id}")
+def update_app_link(link_id: str, payload: AppLinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    if not database.fetch_one("SELECT id FROM app_links WHERE id=?", (link_id,)):
+        raise HTTPException(404, "App niet gevonden")
+    with database.transaction() as connection:
+        connection.execute(
+            """UPDATE app_links SET name=?,url=?,description=?,icon=?,group_name=?,
+               monitor_entity_id=?,position=?,updated_at=? WHERE id=?""",
+            (payload.name.strip(), app_link_url(payload.url), payload.description,
+             payload.icon.strip(), payload.group_name.strip(),
+             resolve_monitor(payload.monitor_entity_id), payload.position, utcnow(), link_id),
+        )
+    database.audit(auth.user_id, "app_link.update", "app_link", link_id, {"name": payload.name})
+    return database.fetch_one("SELECT * FROM app_links WHERE id=?", (link_id,))
+
+
+@app.delete("/api/app-links/{link_id}")
+def delete_app_link(link_id: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    link = database.fetch_one("SELECT name FROM app_links WHERE id=?", (link_id,))
+    if not link:
+        raise HTTPException(404, "App niet gevonden")
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM app_links WHERE id=?", (link_id,))
+    database.audit(auth.user_id, "app_link.delete", "app_link", link_id, {"name": link["name"]})
+    return {"ok": True}
+
+
+@app.post("/api/providers")
+def create_provider(payload: ProviderCreateInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Nog een omgeving van een bestaand soort: een tweede Portainer of AdGuard."""
+    template = next((item for item in PROVIDER_TEMPLATES if item[1] == payload.type), None)
+    if not template:
+        raise HTTPException(422, "Onbekend providertype")
+    provider_id = str(uuid.uuid4())
+    # Het sjabloon bevat voorbeeldadressen; bij een tweede omgeving zouden die
+    # alleen maar suggereren dat er al iets is ingevuld.
+    config = dict(template[4])
+    if "base_url" in config:
+        config["base_url"] = ""
+    if "endpoints" in config:
+        config["endpoints"] = []
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO providers(id,type,name,enabled,poll_interval_seconds,config_json,updated_at)
+               VALUES(?,?,?,0,?,?,?)""",
+            (provider_id, payload.type, payload.name.strip(), template[3], json.dumps(config), utcnow()),
+        )
+    database.audit(auth.user_id, "provider.create", "provider", provider_id, {"type": payload.type})
+    return serialize_provider(database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,)))
+
+
+@app.delete("/api/providers/{provider_id}")
+def delete_provider(provider_id: str, confirm: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    provider = database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
+    if not provider:
+        raise HTTPException(404, "Provider niet gevonden")
+    if confirm != provider["name"]:
+        raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
+    # De laatste van een soort weghalen laat de app zonder die adapter achter;
+    # uitzetten doet hetzelfde zonder de instellingen te verliezen.
+    remaining = database.fetch_one(
+        "SELECT COUNT(*) AS n FROM providers WHERE type=?", (provider["type"],)
+    )["n"]
+    if remaining <= 1:
+        raise HTTPException(409, "Dit is de enige bron van dit type; zet hem uit in plaats van te verwijderen")
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM providers WHERE id=?", (provider_id,))
+    database.audit(auth.user_id, "provider.delete", "provider", provider_id, {"name": provider["name"]})
+    return {"ok": True}
+
+
 @app.patch("/api/providers/{provider_id}")
 def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     provider = database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
@@ -1069,8 +1457,9 @@ def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext 
         raise HTTPException(422, "Onbekend credentialveld voor deze provider")
     with database.transaction() as connection:
         connection.execute(
-            """UPDATE providers SET enabled=?,poll_interval_seconds=?,config_json=?,updated_at=? WHERE id=?""",
-            (int(payload.enabled), payload.poll_interval_seconds, json.dumps(payload.config), utcnow(), provider_id),
+            """UPDATE providers SET name=?,enabled=?,poll_interval_seconds=?,config_json=?,updated_at=? WHERE id=?""",
+            ((payload.name or provider["name"]).strip() or provider["name"], int(payload.enabled),
+             payload.poll_interval_seconds, json.dumps(payload.config), utcnow(), provider_id),
         )
     provider_secrets.update(provider_id, payload.credentials, payload.clear_credentials)
     database.audit(auth.user_id, "provider.update", "provider", provider_id, {"enabled": payload.enabled})

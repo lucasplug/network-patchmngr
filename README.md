@@ -15,6 +15,14 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **Topologie** — geneste hosts/VM's/containers/services, fysieke en virtuele relaties, status en live metrics. Pan met slepen, zoom met het scrollwiel of de knoppen; elke node toont één kerngetal (cpu of respons). In bewerkmodus kun je nodes verslepen, groeperen, hernoemen, plannen en handmatige relaties tekenen.
 - **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
 - **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
+- **Meerdere omgevingen per bron** — twee Portainers, twee AdGuards: elke bron is een eigen instantie met eigen adres, inloggegevens en naam. Toevoegen via **Admin → + Databron**. De laatste van een soort kun je uitzetten maar niet verwijderen.
+- **Bijwerken zonder dataverlies** — de database draagt een schemaversie (`PRAGMA user_version`) en wordt bij het starten automatisch bijgewerkt. Een database van een nieuwere versie wordt geweigerd in plaats van half gemigreerd.
+- **Zoeken** — één veld rechtsboven over apparaten, netwerkapparaten en apps; ook op IP, MAC en hostnaam.
+- **Recente veranderingen** — onder Admin: wat is er verschenen en wat is er al een tijd niet meer gezien. De auditlog zegt wat jíj deed, dit zegt wat het netwerk deed.
+- **CSV-import** — handmatige devices in bulk (`name,type,ip_address,mac_address,hostname,notes`). Bijwerken op MAC of naam, dus hetzelfde bestand twee keer inlezen verdubbelt niets. Onleesbare regels worden benoemd.
+- **Printen** — de patchview op wit, zonder navigatie of zijpaneel, voor in de meterkast.
+- **Apps** — een eigen tabblad met snelkoppelingen naar je diensten, gegroepeerd, met per tegel de status uit Uptime Kuma. Alleen `http(s)`-links worden geaccepteerd.
+- **Licht en donker thema** — de knop rechtsboven wisselt; standaard volgt de app je systeeminstelling. De keuze is per browser, niet per installatie.
 - **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.
 - **Discoverybeheer** — discoveries negeren, archiveren, herstellen of samenvoegen met een bestaand device; providerrecords kunnen ook expliciet worden gekoppeld en ontkoppeld.
 - **Uitwisseling & herstel** — SQLite-back-ups downloaden, importeren en terugzetten, plus configuratie exporteren/importeren als JSON. Voor restore/import wordt automatisch een veiligheidsback-up gemaakt.
@@ -74,15 +82,17 @@ Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de UR
 
 | Provider | Inloggegevens in Admin | Opmerking |
 |---|---|---|
-| DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde `/24`-subnets; maximaal 1024 adressen per subnet |
-| Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints |
-| Glances | gebruikersnaam en wachtwoord | Ondersteunt meerdere API-v4-endpoints |
+| DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde subnetten (max. 1024 adressen elk). Twee ping-pakketten per adres tegen pakketverlies; wat binnen een gescand subnet niet antwoordt gaat op *down* |
+| Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints; de slug van de statuspagina hoort erbij |
+| Glances | gebruikersnaam en wachtwoord | Eén endpoint per machine, elk gekoppeld aan een device dat je zelf aanwijst |
 | Portainer | API-key | Gebruik een aparte gebruiker met minimale environmentrechten |
-| Proxmox | API-tokengeheim | Gebruik een read-only API-token |
+| Proxmox | API-tokengeheim | Gebruik een read-only API-token; vul ook de gebruiker en het token-ID in |
 | AdGuard Home | gebruikersnaam en wachtwoord | Importeert clients en DNS-rewrites via `/control/clients` en `/control/rewrite/list` |
 | Nginx Proxy Manager | API-token of gebruikersnaam en wachtwoord | Importeert proxyhosts; de adapter schrijft niets terug naar NPM |
 
 De meegeleverde configuratie bevat alvast de adressen uit het ontwerp voor Docker VM (`192.168.1.12`) en Proxmox (`192.168.1.100`). Controleer die voordat je providers inschakelt.
+
+Proxmox stelt zijn tokenkop samen uit drie delen: `PVEAPIToken=<gebruiker>!<token-ID>=<geheim>`. In Proxmox staat dat onder *Datacenter → Permissions → API Tokens* als bijvoorbeeld `root@pam!patchmanager`. De wizard vraagt de eerste twee los uit; alleen het geheim wordt versleuteld opgeslagen.
 
 Bij zelfondertekende certificaten kan `verify_tls` tijdelijk op `false`. Een eigen lokale CA en `true` is veiliger.
 
@@ -90,12 +100,21 @@ AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de b
 
 ## Topologie en relaties
 
-- Een fysieke poortkoppeling tekent automatisch een fysieke relatie.
+- Een fysieke poortkoppeling tekent automatisch een fysieke relatie. Dat geldt ook voor een kabel tussen twee netwerkapparaten — de glasvezel-ONT naar een Deco, of switch naar switch. Een patchpaneel ertussen wordt doorlopen, niet als extra knoop getekend.
+- De **glasvezel-ONT** staat als netwerkapparaat met één LAN-poort in de inventaris; het internet komt daar binnen. Waar die poort heen gaat trek je zelf in de patchview, via **Doorverbinding** in de poortlade.
+- Een netwerkapparaat heeft geen eigen status: een switch draait geen agent. Koppel onder **Statusmonitor** de observatie die erover gaat — een Uptime Kuma-ping op het beheer-IP, of de ping-discovery van dat adres — en het apparaat krijgt diens status. Die observatie verdwijnt dan als losse knoop, want anders staat hetzelfde ding er twee keer.
+- Een device kan ook zónder poort aan een netwerkapparaat hangen: wifi-clients op een Deco, of een switchpoort die je nog niet weet. Die verbinding is onderbroken getekend.
 - Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.
 - Relaties die niet betrouwbaar zijn af te leiden — bijvoorbeeld de onderlinge bekabeling van Deco-units zonder SNMP — teken je zelf in **Topologie → Bewerken → Relatie**.
 - Handmatige posities, groepen en parents blijven behouden bij een volgende providersynchronisatie.
 - In bewerkmodus selecteer je meerdere nodes met shift-klik. De selectie kan samen worden versleept of direct in een nieuwe groep worden geplaatst.
 - Handmatige groepen zijn verwijderbaar; kinderen worden daarbij uit de groep gehaald. Met **Ongedaan** herstel je de laatste topologiewijziging.
+
+## Categorieën
+
+Elk device en elk netwerkapparaat heeft een categorie die zijn rol benoemt: switch, mesh access point, patchpanel, host, VM, LXC, container, service, NAS, camera, printer, IoT, router of device. De lijst staat op één plek (`patch_manager/categories.py`) en vult de keuzelijsten, iconen en labels in de hele app. Categorieën met poorten horen bij netwerkapparaten, de rest bij devices; die scheiding zit in de lijst zelf.
+
+Providers bepalen de categorie van een discovery, dus die kan bij elke synchronisatie veranderen. Neem je een discovery over als handmatig device, dan is jouw keuze definitief.
 
 ## Discoveries en bronkoppelingen
 

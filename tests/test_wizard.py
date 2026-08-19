@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from patch_manager import providers as providers_module
 from patch_manager.main import app, database, providers
+from patch_manager.db import utcnow
+from patch_manager.providers import EMPTY_MAC
 
 from tests.conftest import CREDENTIALS
 
@@ -13,6 +18,20 @@ def login(client: TestClient) -> dict[str, str]:
     response = client.post("/api/auth/login", json=CREDENTIALS)
     assert response.status_code == 200, response.text
     return {"X-CSRF-Token": response.json()["csrf_token"]}
+
+
+def wizard_provider(client: TestClient, provider_id: str) -> dict:
+    """De providerkaart zoals de wizard hem uit /api/bootstrap krijgt."""
+    providers_payload = client.get("/api/bootstrap").json()["providers"]
+    return next(row for row in providers_payload if row["id"] == provider_id)
+
+
+def discovery_in_scan(ip: str) -> str:
+    """Een vondst zoals de ARP-scan hem opslaat."""
+    return providers._store_record(
+        "dhcp-arp", ip, "network_device", {"ip": ip},
+        name=ip, entity_type="device", status="up", ip_address=ip,
+    )
 
 
 def make_discovery(external_id: str, name: str, **kwargs) -> str:
@@ -135,6 +154,69 @@ def test_provider_test_endpoint_summarizes_without_saving(monkeypatch: pytest.Mo
     assert database.fetch_one("SELECT enabled FROM providers WHERE id='proxmox'")["enabled"] == 0
 
 
+def test_proxmox_exposes_the_fields_the_token_id_is_built_from() -> None:
+    """Zonder deze velden stuurt de wizard de sjabloonwaarden uit db.py mee."""
+    with TestClient(app) as client:
+        login(client)
+        proxmox = wizard_provider(client, "proxmox")
+        assert [field["key"] for field in proxmox["config_fields"]] == ["user", "token_name"]
+        assert [field["key"] for field in proxmox["credential_fields"]] == ["token_secret"]
+
+
+def test_uptime_kuma_exposes_its_status_page_slug() -> None:
+    with TestClient(app) as client:
+        login(client)
+        kuma = wizard_provider(client, "uptime-kuma")
+        assert [field["key"] for field in kuma["config_fields"]] == ["status_page_slug"]
+
+
+def test_providers_without_extra_config_report_an_empty_list() -> None:
+    with TestClient(app) as client:
+        login(client)
+        portainer = wizard_provider(client, "portainer")
+        assert portainer["config_fields"] == []
+
+
+def test_proxmox_token_id_comes_from_the_submitted_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wat in de wizard is ingevuld moet in de header staan, niet het sjabloon."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return httpx.Response(200, json={"data": []})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: original(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.post(
+            "/api/providers/proxmox/test", headers=headers,
+            json={"config": {"base_url": "https://pve.local:8006", "user": "root@pam", "token_name": "patchmngr"},
+                  "credentials": {"token_secret": "geheim"}},
+        )
+        assert response.status_code == 200, response.text
+    assert seen == ["PVEAPIToken=root@pam!patchmngr=geheim"]
+
+
+def test_proxmox_401_names_the_token_it_tried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Het token-ID komt uit twee velden; de fout moet zeggen welk het probeerde."""
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: original(*a, **{
+        **kw, "transport": httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+    }))
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.post(
+            "/api/providers/proxmox/test", headers=headers,
+            json={"config": {"base_url": "https://pve.local:8006", "user": "root@pam", "token_name": "typfout"},
+                  "credentials": {"token_secret": "n1et-tonen"}},
+        )
+        body = response.json()
+        assert body["ok"] is False
+        assert "root@pam!typfout" in body["summary"]
+        assert "n1et-tonen" not in body["summary"]
+
+
 def test_provider_test_reports_failure_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"message": "unauthorized"})
@@ -165,6 +247,52 @@ def test_provider_test_rejects_unknown_credential_field() -> None:
         assert response.status_code == 422
 
 
+ARP_AFTER_SWEEP = """IP address       HW type     Flags       HW address            Mask     Device
+192.168.100.1    0x1         0x2         58:04:4f:9c:ff:3b     *        eth0
+192.168.100.50   0x1         0x2         f4:65:0b:aa:a1:cb     *        eth0
+192.168.100.51   0x1         0x0         00:00:00:00:00:00     *        eth0
+192.168.100.52   0x1         0x0         00:00:00:00:00:00     *        eth0
+192.168.100.53   0x1         0x6         00:00:00:00:00:00     *        eth0
+192.168.100.54   0x1         0xnope      aa:bb:cc:dd:ee:ff     *        eth0
+kapotte regel
+"""
+
+
+def test_arp_table_skips_neighbours_the_sweep_never_resolved() -> None:
+    """Een ping-sweep laat lege buren achter; die zijn geen apparaten."""
+    neighbours = providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+    assert sorted(neighbours) == ["192.168.100.1", "192.168.100.50"]
+    assert neighbours["192.168.100.1"]["mac"] == "58:04:4f:9c:ff:3b"
+
+
+def test_arp_table_ignores_empty_mac_even_when_flagged_complete() -> None:
+    """De nul-MAC wordt los van de vlaggen geweerd, niet alleen via 0x0."""
+    assert "192.168.100.53" not in providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+
+
+def test_arp_table_survives_a_malformed_flags_column() -> None:
+    assert "192.168.100.54" not in providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+
+
+def test_arp_table_normalises_case() -> None:
+    table = "kop\n10.0.0.9  0x1  0x2  AA:BB:CC:DD:EE:FF  *  eth0\n"
+    assert providers_module.parse_arp_table(table)["10.0.0.9"]["mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_zero_mac_is_not_an_address() -> None:
+    """Anders koppelt _store_record alles met die MAC aan één entity."""
+    assert providers_module.normalize_mac("00:00:00:00:00:00") is None
+    assert providers_module.normalize_mac("00-00-00-00-00-00") is None
+    assert providers_module.normalize_mac("58:04:4f:9c:ff:3b") == "58:04:4f:9c:ff:3b"
+
+
+def test_two_devices_without_a_mac_stay_separate() -> None:
+    """Twee ping-vondsten zonder MAC mogen niet in elkaar schuiven."""
+    first = make_discovery("192.168.1.71", "een", ip_address="192.168.1.71", mac_address=EMPTY_MAC)
+    second = make_discovery("192.168.1.72", "twee", ip_address="192.168.1.72", mac_address=EMPTY_MAC)
+    assert first != second
+
+
 def test_dhcp_arp_test_refuses_untrusted_subnet() -> None:
     with TestClient(app) as client:
         headers = login(client)
@@ -175,3 +303,43 @@ def test_dhcp_arp_test_refuses_untrusted_subnet() -> None:
         assert response.status_code == 200
         assert response.json()["ok"] is False
         assert "PATCH_TRUSTED_SUBNETS" in response.json()["summary"]
+
+
+def test_a_device_that_stops_answering_is_marked_down() -> None:
+    """Zonder dit blijft alles voor altijd 'up' en is de uptime-balk zinloos."""
+    entity_id = discovery_in_scan("192.0.2.5")
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+    # Volgende ronde: wel gescand, niet gevonden.
+    absent = providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    assert absent == 1
+    row = database.fetch_one("SELECT status,last_seen_at FROM entities WHERE id=?", (entity_id,))
+    assert row["status"] == "down"
+    # last_seen_at blijft staan: dat is wanneer het ding er nog wél was.
+    assert row["last_seen_at"] is not None
+
+
+def test_a_device_outside_the_scanned_range_is_left_alone() -> None:
+    """Buiten het gescande bereik hebben we niet gekeken, dus weten we niets."""
+    entity_id = discovery_in_scan("198.51.100.7")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+
+def test_a_device_that_answered_stays_up() -> None:
+    entity_id = discovery_in_scan("192.0.2.6")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], {"192.0.2.6"})
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+
+def test_marking_absent_refreshes_the_observation() -> None:
+    """Anders zet de vervaldecay het apparaat meteen weer op 'unknown'."""
+    entity_id = discovery_in_scan("192.0.2.8")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    row = database.fetch_one(
+        """SELECT value_json,expires_at FROM observations
+           WHERE entity_id=? AND field='status' ORDER BY observed_at DESC LIMIT 1""",
+        (entity_id,),
+    )
+    assert row["value_json"] == '"down"'
+    assert row["expires_at"] > utcnow()

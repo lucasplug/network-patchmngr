@@ -185,7 +185,9 @@ def test_summary_is_lighter_than_bootstrap_but_has_the_live_bits() -> None:
         summary = client.get("/api/summary")
         assert summary.status_code == 200, summary.text
         payload = summary.json()
-        assert set(payload) == {"counts", "entities", "metrics", "providers", "speedtest"}
+        # app_links hoort er wél bij: het appdashboard moet zijn statusbolletjes
+        # kunnen bijwerken zonder een volledige bootstrap op te halen.
+        assert set(payload) == {"counts", "entities", "metrics", "providers", "speedtest", "app_links"}
         assert payload["counts"]["patched"] == 1
         assert any(item["id"] == entity_id for item in payload["entities"])
         # Geen inventaris, audit of topologie in de poll-payload.
@@ -229,3 +231,63 @@ def test_discovery_gets_vendor_from_oui(monkeypatch: pytest.MonkeyPatch) -> None
         assert entity["vendor"] == "TP-LINK TECHNOLOGIES CO.LTD."
     finally:
         oui.reset_cache()
+
+
+def test_a_cable_between_two_network_devices_is_drawn() -> None:
+    """ONT naar Deco: beide uiteinden zijn poorten, geen device."""
+    with TestClient(app) as client:
+        headers = login(client)
+        cabled = client.put(
+            "/api/ports/ont-01-p1/cable", headers=headers,
+            json={"b_port_id": "deco-01-p1", "label": "glasvezel-uplink"},
+        )
+        assert cabled.status_code == 200, cabled.text
+        relations = client.get("/api/bootstrap").json()["topology"]["relations"]
+        trunks = [r for r in relations if r["id"].startswith("trunk:")]
+        assert len(trunks) == 1, trunks
+        assert {trunks[0]["from_node_id"], trunks[0]["to_node_id"]} == {"physical:ont-01", "physical:deco-01"}
+        # Het kabellabel, niet "Poort 1": de kabel is hier het onderwerp.
+        assert trunks[0]["label"] == "glasvezel-uplink"
+
+
+def test_the_internet_arrives_at_the_ont() -> None:
+    with TestClient(app) as client:
+        login(client)
+        topology = client.get("/api/bootstrap").json()["topology"]
+        assert any(node["id"] == "physical:ont-01" for node in topology["nodes"])
+        link = next(r for r in topology["relations"] if r["id"] == "manual:internet-ont")
+        assert link["from_node_id"] == "special:internet"
+        assert link["to_node_id"] == "physical:ont-01"
+        # De oude spookknoop die een Deco nabootste is weg.
+        assert not any(node["id"] == "special:router" for node in topology["nodes"])
+
+
+def test_a_patch_panel_is_traversed_not_drawn() -> None:
+    """Anders krijgt elke verbinding via een paneel er een lijn naar het paneel bij."""
+    with TestClient(app) as client:
+        headers = login(client)
+        panel = client.post(
+            "/api/physical-devices", headers=headers,
+            json={"name": "Paneel zolder", "type": "patch_panel", "ports": 4},
+        ).json()["id"]
+        entity = client.post("/api/entities", headers=headers, json={"name": "Werkplek", "type": "host"}).json()
+        client.put(f"/api/ports/switch-01-p2/cable", headers=headers, json={"b_port_id": f"{panel}-f1"})
+        client.put(f"/api/ports/{panel}-r1/cable", headers=headers, json={"b_entity_id": entity["id"]})
+
+        relations = client.get("/api/bootstrap").json()["topology"]["relations"]
+        assert not [r for r in relations if r["id"].startswith("trunk:")], "paneel wordt als eindpunt getekend"
+        patched = [r for r in relations if r["id"].startswith("patch:")]
+        assert len(patched) == 1
+        assert patched[0]["from_node_id"] == "physical:switch-01"
+        assert patched[0]["to_node_id"] == f"entity:{entity['id']}"
+
+
+def test_ont_is_a_network_device_category() -> None:
+    with TestClient(app) as client:
+        login(client)
+        payload = client.get("/api/bootstrap").json()
+        ont = next(d for d in payload["physical_devices"] if d["id"] == "ont-01")
+        assert ont["type"] == "ont"
+        assert len(ont["ports"]) == 1
+        category = next(c for c in payload["categories"] if c["key"] == "ont")
+        assert category["physical"] is True and category["attachable"] is False

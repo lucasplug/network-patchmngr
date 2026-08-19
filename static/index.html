@@ -3,11 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>Network Patch Manager</title>
   <!-- Inline favicon: scheelt een request en een 404 in het serverlog. -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e141c'/%3E%3Crect x='3' y='5' width='2.5' height='6' rx='1' fill='%233ddc97'/%3E%3Crect x='6.75' y='5' width='2.5' height='6' rx='1' fill='%238f7df8'/%3E%3Crect x='10.5' y='5' width='2.5' height='6' rx='1' fill='%23667282'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/styles.css">
+  <script>
+    // Inline en vóór de stylesheet-render: anders flitst bij elke reload eerst
+    // het donkere thema voorbij.
+    try {
+      var saved = localStorage.getItem("patch-theme");
+      var light = saved ? saved === "light" : window.matchMedia("(prefers-color-scheme: light)").matches;
+      if (light) document.documentElement.setAttribute("data-theme", "light");
+    } catch (e) { /* private mode: dan gewoon donker */ }
+  </script>
 </head>
 <body>
   <div class="ambient"></div>
@@ -40,7 +49,9 @@
           <span class="speed-ping" id="speed-ping">— ms</span>
           <span class="speed-age" id="speed-age">nog niet gemeten</span>
         </button>
+        <div class="search-box"><input id="search-input" type="search" placeholder="Zoeken…" autocomplete="off" aria-label="Zoek in de inventaris"><div id="search-results" class="search-results hidden"></div></div>
         <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
+        <button class="icon-button" id="theme-toggle" title="Licht of donker" aria-label="Wissel tussen licht en donker">◐</button>
         <button class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
         <button class="profile-button" id="logout-button"><span class="avatar" id="avatar">A</span><span id="username">admin</span></button>
       </div>
@@ -48,6 +59,7 @@
 
     <nav class="tabs" aria-label="Hoofdnavigatie">
       <button class="tab active" data-tab="patch"><span class="tab-icon">⌁</span>Patch</button>
+      <button class="tab" data-tab="apps"><span class="tab-icon">▦</span>Apps</button>
       <button class="tab" data-tab="topology"><span class="tab-icon">◇</span>Topologie</button>
       <button class="tab" data-tab="admin"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
     </nav>
@@ -55,7 +67,7 @@
     <section id="patch-view" class="view active">
       <div class="view-heading">
         <div><p class="eyebrow">Handmatig · bron van waarheid</p><h1>Fysieke aansluitingen</h1><p class="muted">Automatische bronnen tonen status, maar wijzigen nooit jouw poortkeuzes.</p></div>
-        <div class="heading-actions"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
+        <div class="heading-actions"><button class="button" id="print-patch">Printen</button><button class="button" id="import-csv-button">CSV importeren</button><input class="hidden" id="import-csv-file" type="file" accept=".csv,text/csv"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
       </div>
       <div id="summary-chips" class="chips"></div>
       <div class="patch-layout">
@@ -71,6 +83,14 @@
       </div>
       <div class="section-bar with-space"><span>Handmatige devices</span><span class="muted" id="manual-entity-count"></span></div>
       <div id="manual-entities-list" class="data-list"></div>
+    </section>
+
+    <section id="apps-view" class="view">
+      <div class="view-heading">
+        <div><p class="eyebrow">Snelkoppelingen</p><h1>Apps</h1><p class="muted">Links naar je eigen diensten, met de status uit Uptime Kuma ernaast.</p></div>
+        <div class="heading-actions"><button class="button primary" id="new-app-button">+ App</button></div>
+      </div>
+      <div id="apps-grid" class="apps-grid"></div>
     </section>
 
     <section id="topology-view" class="view">
@@ -98,10 +118,14 @@
       <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".pmbackup,.db,application/zip,application/vnd.sqlite3"></div></div>
       <div class="admin-grid">
         <section class="admin-main">
-          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
+          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="add-provider">+ Databron</button><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
           <div id="providers-grid" class="providers-grid"></div>
+          <div class="section-bar with-space"><span>Recente veranderingen</span><span class="muted"><select id="changes-days" aria-label="Periode"><option value="1">24 uur</option><option value="7" selected>7 dagen</option><option value="30">30 dagen</option></select></span></div>
+          <div id="changes-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Hangt aan een netwerkapparaat (geen poort)</span><span class="muted" id="uplink-count"></span></div>
+          <div id="uplinks-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Genegeerd & gearchiveerd</span><span class="muted" id="inactive-discovery-count"></span></div>
           <div id="inactive-discoveries-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Expliciete bronkoppelingen</span><span class="muted" id="mapping-count"></span></div>
@@ -143,8 +167,9 @@
     <form id="entity-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Handmatig device</p><h2 id="entity-dialog-title">Device toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="entity_id">
       <label>Naam<input name="name" required placeholder="bijv. NAS DS223"></label>
-      <div class="field-row"><label>Type<select name="type"><option value="device">Device</option><option value="host">Host</option><option value="nas">NAS</option><option value="camera">Camera</option><option value="router">Router/modem</option><option value="printer">Printer</option><option value="iot">IoT</option></select></label><label>Hostname<input name="hostname"></label></div>
+      <div class="field-row"><label>Categorie<select name="type" id="entity-type-select"></select></label><label>Hostname<input name="hostname"></label></div>
       <div class="field-row"><label>IP-adres<input name="ip_address" inputmode="decimal"></label><label>MAC-adres<input name="mac_address" placeholder="aa:bb:cc:dd:ee:ff"></label></div>
+      <label id="entity-uplink-field">Hangt aan (zonder poort)<select name="uplink_device_id" id="entity-uplink-select"></select><small class="muted" id="entity-uplink-hint"></small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
     </form>
@@ -154,8 +179,9 @@
     <form id="physical-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Patchapparaat</p><h2 id="physical-dialog-title">Netwerkapparaat toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="device_id">
       <label>Naam<input name="name" required placeholder="bijv. Patchpanel zolder"></label>
-      <div class="field-row"><label>Type<select name="type"><option value="switch">Switch</option><option value="mesh_ap">Mesh access point</option><option value="access_point">Access point</option><option value="patch_panel">Patchpanel</option></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
+      <div class="field-row"><label>Categorie<select name="type" id="physical-type-select"></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
       <div class="field-row"><label>Model<input name="model"></label><label>Locatie<input name="location"></label></div>
+      <label>Statusmonitor<select name="monitor_entity_id" id="physical-monitor-select"></select><small class="muted">Bijvoorbeeld een Uptime Kuma-ping op het beheer-IP. Zonder koppeling blijft de status onbekend.</small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
     </form>
@@ -165,11 +191,40 @@
     <form id="provider-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Providerconfiguratie</p><h2 id="provider-dialog-title">Provider</h2></div><button type="button" class="icon-button modal-close">×</button></div>
       <input type="hidden" name="provider_id">
+      <label>Naam<input name="name" required maxlength="100" placeholder="bijv. Portainer zolder"></label>
       <div class="field-row"><label class="toggle-label"><input name="enabled" type="checkbox"><span>Provider ingeschakeld</span></label><label>Pollinterval (seconden)<input name="poll_interval_seconds" type="number" min="15" max="86400"></label></div>
+      <div id="provider-endpoints" class="stack hidden">
+        <div class="section-bar"><span>Glances-endpoints</span><button type="button" class="button micro" id="endpoint-add">+ Endpoint</button></div>
+        <div id="endpoint-rows" class="stack"></div>
+        <p class="muted tiny">Eén regel per machine waar Glances draait. Kies per endpoint welk device het meet; op hostnaam matchen leverde dubbele hosts op.</p>
+      </div>
       <label>Configuratie (JSON)<textarea class="code-input" name="config" rows="14" spellcheck="false"></textarea></label>
       <div id="provider-credentials" class="stack"></div>
       <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="app-dialog" class="modal glass">
+    <form id="app-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Snelkoppeling</p><h2 id="app-dialog-title">App toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="link_id">
+      <div class="field-row"><label>Naam<input name="name" required maxlength="80" placeholder="bijv. Portainer"></label><label>Icoon<input name="icon" maxlength="8" placeholder="bijv. 🐳"></label></div>
+      <label>Link<input name="url" required maxlength="500" placeholder="https://host:poort" inputmode="url"></label>
+      <label>Omschrijving<input name="description" maxlength="200" placeholder="optioneel"></label>
+      <div class="field-row"><label>Groep<input name="group_name" maxlength="60" placeholder="bijv. Beheer"></label><label>Volgorde<input name="position" type="number" min="0" max="999" value="0"></label></div>
+      <label>Status via<select name="monitor_entity_id" id="app-monitor-select"></select><small class="muted">Een Uptime Kuma-monitor of ander geobserveerd device. Zonder koppeling blijft de status onbekend.</small></label>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="app-delete">Verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="provider-add-dialog" class="modal glass">
+    <form id="provider-add-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Databron</p><h2>Nog een omgeving toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <p class="muted tiny">Voor als je twee Portainers of twee AdGuards draait. Adres en inloggegevens vul je daarna in bij Configureren.</p>
+      <label>Soort<select name="type" id="provider-add-type"></select></label>
+      <label>Naam<input name="name" required maxlength="100" placeholder="bijv. AdGuard zolder"></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
     </form>
   </dialog>
 

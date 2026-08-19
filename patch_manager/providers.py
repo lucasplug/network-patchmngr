@@ -22,12 +22,55 @@ logger = logging.getLogger(__name__)
 
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
+# Vlag ATF_COM in /proc/net/arp: het adres is echt opgelost. Staat hij niet aan,
+# dan is het een lege buur met MAC 00:00:00:00:00:00.
+ARP_FLAG_COMPLETE = 0x2
+# Hardgecodeerd met opzet: op een thuisnetwerk hoeft hier geen knop aan te
+# zitten. 48 gelijktijdige pings houdt een /22 binnen een minuut.
+PING_CONCURRENCY = 48
+SCAN_TIMEOUT_SECONDS = 180
+EMPTY_MAC = "00:00:00:00:00:00"
+
 
 def normalize_mac(value: str | None) -> str | None:
+    """Een MAC-adres in kleine letters, of None als het er geen is.
+
+    De nul-MAC telt niet: hij is syntactisch geldig maar hoort bij geen enkel
+    apparaat. Zou hij wel blijven staan, dan koppelt _store_record elk
+    apparaat met die MAC aan dezelfde entity.
+    """
     if not value:
         return None
     match = MAC_RE.search(value.replace("-", ":"))
-    return match.group(0).lower() if match else None
+    if not match:
+        return None
+    mac = match.group(0).lower()
+    return None if mac == EMPTY_MAC else mac
+
+
+def parse_arp_table(text: str) -> dict[str, dict[str, str]]:
+    """De opgeloste buren uit /proc/net/arp, op IP.
+
+    Een ping-sweep laat voor élk adres waar niets op zit een onvolledige buur
+    achter: vlaggen 0x0 en MAC 00:00:00:00:00:00. Zonder deze twee controles
+    levert een scan over een /22 honderden 'apparaten' op die niet bestaan.
+    """
+    neighbours: dict[str, dict[str, str]] = {}
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        mac = normalize_mac(parts[3])
+        if not mac:
+            continue
+        try:
+            flags = int(parts[2], 16)
+        except ValueError:
+            continue
+        if not flags & ARP_FLAG_COMPLETE:
+            continue
+        neighbours[parts[0]] = {"ip": parts[0], "mac": mac}
+    return neighbours
 
 
 def is_ip_literal(value: Any) -> bool:
@@ -115,6 +158,7 @@ class ProviderManager:
         mac_address: str | None = None,
         hostname: str | None = None,
         parent_id: str | None = None,
+        bind_entity_id: str | None = None,
     ) -> str:
         now = utcnow()
         mac_address = normalize_mac(mac_address)
@@ -124,7 +168,12 @@ class ProviderManager:
             (provider_id, external_id),
         )
         entity = None
-        if existing_record and existing_record["entity_id"]:
+        # Een expliciete koppeling uit de configuratie (Glances-endpoint → device)
+        # gaat vóór alle raadwerk hieronder. Bestaat het device niet meer, dan
+        # valt hij terug op de normale matching in plaats van te crashen.
+        if bind_entity_id:
+            entity = self.database.fetch_one("SELECT * FROM entities WHERE id=?", (bind_entity_id,))
+        if not entity and existing_record and existing_record["entity_id"]:
             entity = self.database.fetch_one("SELECT * FROM entities WHERE id=?", (existing_record["entity_id"],))
         if not entity and mac_address:
             entity = self.database.fetch_one("SELECT * FROM entities WHERE lower(mac_address)=?", (mac_address,))
@@ -159,7 +208,11 @@ class ProviderManager:
                         (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, vendor, now, now, entity_id),
                     )
             else:
-                self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
+                # Bij een expliciete koppeling is een afwijkende naam geen
+                # conflict maar de bedoeling: je hebt zelf gezegd dat dit
+                # hetzelfde apparaat is.
+                if not bind_entity_id:
+                    self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
                 with self.database.transaction() as connection:
                     connection.execute(
                         "UPDATE entities SET status=?,status_updated_at=?,last_seen_at=? WHERE id=?",
@@ -230,48 +283,67 @@ class ProviderManager:
 
         def read_arp_table() -> None:
             if arp_path.exists():
-                for line in arp_path.read_text().splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4 and normalize_mac(parts[3]):
-                        found[parts[0]] = {"ip": parts[0], "mac": parts[3]}
+                found.update(parse_arp_table(arp_path.read_text()))
 
         read_arp_table()
 
+        scanned: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
         if config.get("scan"):
+            semaphore = asyncio.Semaphore(PING_CONCURRENCY)
+
+            async def ping(ip: str) -> None:
+                async with semaphore:
+                    try:
+                        # Twee pakketten, niet één: op wifi raakt er geregeld
+                        # eentje kwijt, en met één probe zou dat apparaat als
+                        # down in de historie belanden. Alleen vlaggen die
+                        # overal bestaan; -i is niet op elke ping beschikbaar.
+                        process = await asyncio.create_subprocess_exec(
+                            "ping", "-c", "2", "-W", "1", ip,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        if await process.wait() == 0:
+                            found.setdefault(ip, {"ip": ip, "mac": ""})
+                    except FileNotFoundError:
+                        return
+
             for subnet_value in config.get("subnets", [])[:8]:
                 network = ipaddress.ip_network(subnet_value, strict=False)
                 if not self._network_is_trusted(network):
                     raise ValueError(f"Subnet {network} valt buiten PATCH_TRUSTED_SUBNETS")
                 if network.num_addresses > 1024:
                     raise ValueError(f"Subnet {network} bevat meer dan 1024 adressen")
-                semaphore = asyncio.Semaphore(48)
-
-                async def ping(ip: str) -> None:
-                    async with semaphore:
-                        try:
-                            process = await asyncio.create_subprocess_exec(
-                                "ping", "-c", "1", "-W", "1", ip,
-                                stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.DEVNULL,
-                            )
-                            if await process.wait() == 0:
-                                found.setdefault(ip, {"ip": ip, "mac": ""})
-                        except FileNotFoundError:
-                            return
-
-                await asyncio.gather(*(ping(str(ip)) for ip in network.hosts()))
+                # Een hangende ping mag de hele synchronisatie niet ophouden;
+                # wat binnen is, is binnen.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(ping(str(ip)) for ip in network.hosts())),
+                        timeout=SCAN_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    logger.warning("Scan van %s afgekapt na %ss", network, SCAN_TIMEOUT_SECONDS)
+                scanned.append(network)
             read_arp_table()
 
-        count = 0
-        for item in found.values():
-            if not self._address_is_trusted(item["ip"]):
-                continue
+        present = [item for item in found.values() if self._address_is_trusted(item["ip"])]
+
+        # Reverse lookups parallel: serieel is dit bij tweehonderd apparaten
+        # met een timeout van twee seconden al langer dan het pollinterval.
+        async def hostname_for(ip: str) -> str | None:
             try:
-                hostname = (await asyncio.wait_for(
-                    asyncio.to_thread(reverse_hostname, item["ip"]), timeout=2
-                ))
+                return await asyncio.wait_for(asyncio.to_thread(reverse_hostname, ip), timeout=2)
             except (TimeoutError, asyncio.TimeoutError):
-                hostname = None
+                return None
+
+        hostnames = dict(zip(
+            [item["ip"] for item in present],
+            await asyncio.gather(*(hostname_for(item["ip"]) for item in present)),
+        ))
+
+        count = 0
+        for item in present:
+            hostname = hostnames.get(item["ip"])
             await asyncio.to_thread(
                 self._store_record,
                 provider["id"],
@@ -286,7 +358,70 @@ class ProviderManager:
                 hostname=hostname,
             )
             count += 1
+
+        if scanned:
+            count += await asyncio.to_thread(
+                self._mark_absent, provider["id"], scanned, {item["ip"] for item in present}
+            )
         return count
+
+    def _mark_absent(
+        self,
+        provider_id: str,
+        scanned: list[Any],
+        present: set[str],
+    ) -> int:
+        """Zet apparaten die we actief zochten maar niet vonden op 'down'.
+
+        Zonder dit blijft alles voor altijd 'up': de adapter meldde alleen wat
+        hij vond. Een uitgezet apparaat viel daarna hooguit terug op 'unknown'
+        als de observatie verliep, en dat is te slap — we hebben gekeken en
+        niets gekregen, dat is bewijs. Alleen adressen binnen de gescande
+        subnetten tellen mee; buiten dat bereik weten we niets.
+        """
+        rows = self.database.fetch_all(
+            """SELECT e.id,e.ip_address FROM entities e
+               JOIN provider_records pr ON pr.entity_id=e.id
+               WHERE pr.provider_id=? AND e.ip_address IS NOT NULL
+                 AND e.status!='down' AND e.archived=0""",
+            (provider_id,),
+        )
+        absent = []
+        for row in rows:
+            if row["ip_address"] in present:
+                continue
+            try:
+                address = ipaddress.ip_address(row["ip_address"])
+            except ValueError:
+                continue
+            if any(address in network for network in scanned):
+                absent.append(row["id"])
+        if not absent:
+            return 0
+        now = utcnow()
+        provider_row = self.database.fetch_one(
+            "SELECT poll_interval_seconds FROM providers WHERE id=?", (provider_id,)
+        )
+        ttl = max(300, int(provider_row["poll_interval_seconds"]) * 3 if provider_row else 600)
+        expires = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat(timespec="seconds")
+        with self.database.transaction() as connection:
+            for entity_id in absent:
+                # last_seen_at blijft staan: dat is wanneer het ding er nog wél
+                # was, en die betekenis wil je niet kwijt.
+                connection.execute(
+                    "UPDATE entities SET status='down',status_updated_at=?,updated_at=? WHERE id=?",
+                    (now, now, entity_id),
+                )
+                connection.execute(
+                    "DELETE FROM observations WHERE entity_id=? AND provider_id=? AND field='status'",
+                    (entity_id, provider_id),
+                )
+                connection.execute(
+                    """INSERT INTO observations(id,entity_id,provider_id,field,value_json,observed_at,expires_at,confidence)
+                       VALUES(?,?,?,'status',?,?,?,1.0)""",
+                    (str(uuid.uuid4()), entity_id, provider_id, json.dumps("down"), now, expires),
+                )
+        return len(absent)
 
     async def _sync_uptime_kuma(self, provider: dict[str, Any], config: dict[str, Any]) -> int:
         base_url = str(config.get("base_url", "")).rstrip("/")
@@ -322,11 +457,20 @@ class ProviderManager:
         password = credentials.get("password")
         if username and password:
             auth = (username, password)
+        endpoints = config.get("endpoints", []) or []
+        missing = [
+            endpoint.get("name") or endpoint.get("url") or "naamloos"
+            for endpoint in endpoints
+            if str(endpoint.get("url", "")).strip() and not endpoint.get("entity_id")
+        ]
+        if missing:
+            raise ValueError(f"Geen device gekozen voor endpoint: {', '.join(missing)}")
         async with httpx.AsyncClient(timeout=15, auth=auth) as client:
-            for endpoint in config.get("endpoints", []):
+            for endpoint in endpoints:
                 base_url = str(endpoint.get("url", "")).rstrip("/")
                 if not base_url:
                     continue
+                bind_entity_id = endpoint.get("entity_id")
                 responses = await asyncio.gather(
                     client.get(f"{base_url}/system"), client.get(f"{base_url}/ip"),
                     client.get(f"{base_url}/containers"), client.get(f"{base_url}/quicklook"),
@@ -341,16 +485,19 @@ class ProviderManager:
                 memory = responses[4].json() if not isinstance(responses[4], Exception) and responses[4].status_code == 200 else {}
                 host_id = await asyncio.to_thread(
                     self._store_record,
-                    provider["id"], f"host:{host_name}", "host",
+                    # Het endpoint is de sleutel, niet de hostnaam: verandert de
+                    # hostnaam van de machine, dan blijft dit dezelfde rij.
+                    provider["id"], f"host:{bind_entity_id}", "host",
                     {"system": system, "ip": ip_data, "quicklook": quicklook, "memory": memory},
                     name=host_name, entity_type="host", status="up", ip_address=ip_data.get("address"), hostname=host_name,
+                    bind_entity_id=bind_entity_id,
                 )
                 count += 1
                 if not isinstance(responses[2], Exception) and responses[2].status_code == 200:
                     for container in responses[2].json():
                         await asyncio.to_thread(
                             self._store_record,
-                            provider["id"], f"container:{host_name}:{container.get('id') or container.get('name')}",
+                            provider["id"], f"container:{bind_entity_id}:{container.get('id') or container.get('name')}",
                             "container", container, name=container.get("name") or "container", entity_type="container",
                             status="up" if str(container.get("status", "")).lower().startswith("up") else "down",
                             parent_id=host_id,
@@ -582,12 +729,7 @@ class ProviderManager:
 
     async def _test_dhcp_arp(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
         arp_path = Path("/proc/net/arp")
-        entries = 0
-        if arp_path.exists():
-            for line in arp_path.read_text().splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 4 and normalize_mac(parts[3]):
-                    entries += 1
+        entries = len(parse_arp_table(arp_path.read_text())) if arp_path.exists() else 0
         subnets = [str(value) for value in config.get("subnets", [])]
         for value in subnets:
             network = ipaddress.ip_network(value, strict=False)
@@ -617,18 +759,38 @@ class ProviderManager:
         auth = None
         if credentials.get("username") and credentials.get("password"):
             auth = (credentials["username"], credentials["password"])
+        # Test alle endpoints en meld ze per stuk: met meerdere machines wil je
+        # weten wélke er stuk is, niet dat er "iets" niet werkt.
         found: list[str] = []
+        working = 0
         async with httpx.AsyncClient(timeout=15, auth=auth) as client:
             for endpoint in endpoints:
                 base_url = str(endpoint.get("url", "")).rstrip("/")
                 if not base_url:
                     continue
-                response = await client.get(f"{base_url}/system")
-                response.raise_for_status()
-                containers = await client.get(f"{base_url}/containers")
-                count = len(containers.json()) if containers.status_code == 200 else 0
-                found.append(f"{response.json().get('hostname') or base_url} ({count} container(s))")
-        return "Hosts: " + ", ".join(found) if found else "Geen bruikbare endpoints"
+                title = endpoint.get("name") or base_url
+                if not endpoint.get("entity_id"):
+                    found.append(f"{title}: geen device gekozen")
+                    continue
+                try:
+                    response = await client.get(f"{base_url}/system")
+                    response.raise_for_status()
+                    containers = await client.get(f"{base_url}/containers")
+                    count = len(containers.json()) if containers.status_code == 200 else 0
+                except httpx.HTTPStatusError as exc:
+                    found.append(f"{title}: HTTP {exc.response.status_code}")
+                except httpx.HTTPError as exc:
+                    found.append(f"{title}: {exc.__class__.__name__}")
+                else:
+                    working += 1
+                    found.append(f"{title} → {response.json().get('hostname') or base_url} ({count} container(s))")
+        if not found:
+            raise ValueError("Geen bruikbare endpoints")
+        # Eén kapotte machine tussen vijf werkende blokkeert het opslaan niet;
+        # niets dat werkt wél.
+        if not working:
+            raise ValueError(" · ".join(found))
+        return " · ".join(found)
 
     async def _test_adguard(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
         base_url = str(config.get("base_url", "")).rstrip("/")
@@ -694,6 +856,13 @@ class ProviderManager:
             timeout=20, verify=bool(config.get("verify_tls", True)), headers=headers
         ) as client:
             response = await client.get(f"{base_url}/api2/json/cluster/resources")
+            # Een kale "401" helpt hier niet: het token-ID wordt uit twee velden
+            # samengesteld, dus laat zien wat er daadwerkelijk is verstuurd.
+            if response.status_code == 401:
+                raise ValueError(
+                    f"HTTP 401: Proxmox weigert token '{user}!{token_name}'. Controleer de gebruiker, "
+                    "het token-ID en het geheim, en of het token leesrechten heeft."
+                )
             response.raise_for_status()
         resources = response.json().get("data", [])
         kinds = {"node": 0, "qemu": 0, "lxc": 0}

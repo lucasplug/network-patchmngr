@@ -22,11 +22,12 @@ def test_initializes_expected_physical_inventory() -> None:
         response = client.get("/api/bootstrap")
         assert response.status_code == 200
         payload = response.json()
-        assert len(payload["physical_devices"]) == 5
-        assert payload["counts"]["ports"] == 25
+        # 2 switches (8) + 3 Deco's (3) + de glasvezel-ONT (1)
+        assert len(payload["physical_devices"]) == 6
+        assert payload["counts"]["ports"] == 26
         assert payload["counts"]["patched"] == 0
         assert len(payload["providers"]) == 7
-        assert {node["id"] for node in payload["topology"]["nodes"]} >= {"special:internet", "special:router"}
+        assert {node["id"] for node in payload["topology"]["nodes"]} >= {"special:internet", "physical:ont-01"}
         assert payload["speedtest"]["settings"]["telemetry_enabled"] is False
         assert csrf
 
@@ -170,7 +171,7 @@ def test_topology_and_dns_are_interactively_configurable() -> None:
         assert moved.status_code == 200, moved.text
         relation = client.post(
             "/api/topology/relations", headers=headers,
-            json={"from_node_id": "special:router", "to_node_id": group_id, "relation_type": "network", "label": "LAN"},
+            json={"from_node_id": "physical:ont-01", "to_node_id": group_id, "relation_type": "network", "label": "LAN"},
         )
         assert relation.status_code == 200, relation.text
         dns = client.post(
@@ -327,11 +328,11 @@ def test_topology_grouping_delete_and_undo() -> None:
         headers = {"X-CSRF-Token": csrf}
         group = client.post(
             "/api/topology/groups", headers=headers,
-            json={"label": "Selectiegroep", "subtitle": "test", "node_ids": ["special:router"]},
+            json={"label": "Selectiegroep", "subtitle": "test", "node_ids": ["physical:ont-01"]},
         )
         assert group.status_code == 200, group.text
         group_id = group.json()["id"]
-        assert database.fetch_one("SELECT parent_node_id FROM topology_nodes WHERE id='special:router'")["parent_node_id"] == group_id
+        assert database.fetch_one("SELECT parent_node_id FROM topology_nodes WHERE id='physical:ont-01'")["parent_node_id"] == group_id
         undo = client.post("/api/topology/undo", headers=headers)
         assert undo.status_code == 200, undo.text
         assert database.fetch_one("SELECT id FROM topology_nodes WHERE id=?", (group_id,)) is None

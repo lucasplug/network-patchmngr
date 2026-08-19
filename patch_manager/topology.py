@@ -45,6 +45,20 @@ def trace_entity(port_id: str, ports: dict[str, dict[str, Any]], by_port: dict[s
     return trace_from_port(port_id, ports, by_port)[1]
 
 
+def trace_far_port(port_id: str, ports: dict[str, dict[str, Any]], by_port: dict[str, dict[str, Any]]) -> str | None:
+    """De poort waar deze kabel uitkomt, als hij niet op een device eindigt.
+
+    Een ONT die bedraad naar een Deco gaat is precies dit geval: beide
+    uiteinden zijn poorten, dus `trace_entity` geeft niets terug en zonder
+    deze functie blijft de verbinding onzichtbaar in de topologie.
+    """
+    hops, entity_id = trace_from_port(port_id, ports, by_port)
+    if entity_id or not hops:
+        return None
+    last = hops[-1]
+    return last.get("port_id") if last.get("kind") == "cable" else None
+
+
 def sync_topology_catalog(database: Database) -> None:
     """Project inventory into topology nodes without touching manual layout."""
     now = utcnow()
@@ -63,7 +77,18 @@ def sync_topology_catalog(database: Database) -> None:
                  40 + index * 220, 230, 190, 64, now, now),
             )
 
-        entities = connection.execute("SELECT * FROM entities WHERE ignored=0 AND archived=0").fetchall()
+        # Een monitor die de status van een netwerkapparaat levert, hoort niet
+        # ook nog als losse knoop in beeld: dan staat hetzelfde ding er twee
+        # keer. Zijn status zit al op het apparaat.
+        entities = connection.execute(
+            """SELECT * FROM entities WHERE ignored=0 AND archived=0
+                 AND id NOT IN (SELECT monitor_entity_id FROM physical_devices
+                                WHERE monitor_entity_id IS NOT NULL)"""
+        ).fetchall()
+        connection.execute(
+            """DELETE FROM topology_nodes WHERE reference_type='entity' AND reference_id IN
+                 (SELECT monitor_entity_id FROM physical_devices WHERE monitor_entity_id IS NOT NULL)"""
+        )
         for index, entity in enumerate(entities):
             node_id = f"entity:{entity['id']}"
             parent_node_id = f"entity:{entity['parent_id']}" if entity["parent_id"] else None
@@ -96,23 +121,83 @@ def sync_topology_catalog(database: Database) -> None:
             if port["side"] != "front" or port_id not in by_port:
                 continue
             entity_id = trace_entity(port_id, ports, by_port)
-            if not entity_id:
+            if entity_id:
+                connection.execute(
+                    """INSERT OR REPLACE INTO topology_relations
+                       (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
+                       VALUES(?,?,?,?,?,'patch',1,?,?)""",
+                    (f"patch:{port_id}", f"physical:{port['physical_device_id']}",
+                     f"entity:{entity_id}", "physical", port["label"], now, now),
+                )
                 continue
+            # Kabel tussen twee netwerkapparaten: ONT naar Deco, of switch naar
+            # switch. Beide uiteinden vinden dezelfde verbinding, dus de sleutel
+            # is het gesorteerde poortpaar; anders krijg je hem dubbel.
+            # Een poort met een peer is de voorkant van een patchpaneel: die
+            # wordt dóórlopen, niet getekend. Zonder deze regel krijgt elke
+            # verbinding via een paneel er een lijn naar het paneel bij.
+            if port["peer_port_id"]:
+                continue
+            far_port_id = trace_far_port(port_id, ports, by_port)
+            far_port = ports.get(far_port_id or "")
+            if not far_port or far_port["physical_device_id"] == port["physical_device_id"]:
+                continue
+            first, second = sorted((port_id, far_port_id))
             connection.execute(
                 """INSERT OR REPLACE INTO topology_relations
                    (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
                    VALUES(?,?,?,?,?,'patch',1,?,?)""",
-                (f"patch:{port_id}", f"physical:{port['physical_device_id']}",
-                 f"entity:{entity_id}", "physical", port["label"], now, now),
+                # Het kabellabel zegt meer dan "Poort 1": bij een verbinding
+                # tussen twee apparaten is de kabel het onderwerp.
+                (f"trunk:{first}:{second}",
+                 f"physical:{ports[first]['physical_device_id']}",
+                 f"physical:{ports[second]['physical_device_id']}",
+                 "physical", by_port[port_id]["label"] or ports[first]["label"], now, now),
+            )
+
+        # Poortloze uplinks: wifi-clients op een Deco, of een switchpoort die
+        # nog niet bekend is. Zelfde herkomst 'patch' zodat ze mee opgeruimd
+        # worden, maar een eigen relation_type zodat de tekening ze anders
+        # weergeeft dan een echte kabel.
+        # Levert deze entity de status van een netwerkapparaat, dan is zijn
+        # knoop hierboven verwijderd. Een relatie ernaartoe zou verwijzen naar
+        # iets dat niet bestaat en de hele topologie laten omvallen.
+        uplinks = connection.execute(
+            """SELECT e.id,e.uplink_device_id,d.type AS device_type FROM entities e
+               JOIN physical_devices d ON d.id=e.uplink_device_id
+               WHERE e.uplink_device_id IS NOT NULL AND e.ignored=0 AND e.archived=0
+                 AND e.id NOT IN (SELECT monitor_entity_id FROM physical_devices
+                                  WHERE monitor_entity_id IS NOT NULL)"""
+        ).fetchall()
+        for entity in uplinks:
+            wireless = entity["device_type"] in ("mesh_ap", "access_point")
+            connection.execute(
+                """INSERT OR REPLACE INTO topology_relations
+                   (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'patch',1,?,?)""",
+                # Niet "uplink": dat type bestond al voor de internet-routerlijn.
+                (f"uplink:{entity['id']}", f"physical:{entity['uplink_device_id']}",
+                 f"entity:{entity['id']}", "wireless" if wireless else "portless",
+                 "wifi" if wireless else "poort onbekend", now, now),
             )
 
 
 def topology_payload(database: Database) -> dict[str, Any]:
     sync_topology_catalog(database)
+    # Een netwerkapparaat heeft geen eigen status; het leent die van de
+    # observatie die erover gaat (monitor_entity_id). Vandaar de tweede join.
     nodes = database.fetch_all(
-        """SELECT n.*,e.status,e.ip_address,e.hostname,e.last_seen_at
-           FROM topology_nodes n LEFT JOIN entities e
+        """SELECT n.*,
+                  COALESCE(e.status, m.status) AS status,
+                  COALESCE(e.ip_address, m.ip_address) AS ip_address,
+                  COALESCE(e.hostname, m.hostname) AS hostname,
+                  COALESCE(e.last_seen_at, m.last_seen_at) AS last_seen_at
+           FROM topology_nodes n
+           LEFT JOIN entities e
              ON n.reference_type='entity' AND e.id=n.reference_id
+           LEFT JOIN physical_devices d
+             ON n.reference_type='physical' AND d.id=n.reference_id
+           LEFT JOIN entities m ON m.id=d.monitor_entity_id
            WHERE n.hidden=0 ORDER BY n.created_at"""
     )
     metrics = entity_metrics(database)
