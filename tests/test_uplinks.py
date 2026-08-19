@@ -212,3 +212,44 @@ def test_glances_test_reports_each_endpoint_separately(monkeypatch: pytest.Monke
         assert body["ok"] is True
         assert "werkt →" in body["summary"]
         assert "geen-device: geen device gekozen" in body["summary"]
+
+
+def test_things_without_a_port_cannot_hang_on_a_switch() -> None:
+    """Een container zit niet in een switchpoort; die hangt aan zijn host."""
+    with TestClient(app) as client:
+        headers = login(client)
+        for kind in ("container", "service", "vm", "lxc"):
+            entity = client.post("/api/entities", headers=headers, json={"name": f"iets-{kind}", "type": kind}).json()
+            response = client.put(
+                f"/api/entities/{entity['id']}/uplink", headers=headers,
+                json={"physical_device_id": "switch-01"},
+            )
+            assert response.status_code == 409, f"{kind}: {response.text}"
+            assert "geen netwerkpoort" in response.json()["detail"]
+
+
+def test_a_host_may_hang_on_a_switch() -> None:
+    """Glances en Proxmox leveren hosts; die horen wél aan een poort of switch."""
+    with TestClient(app) as client:
+        headers = login(client)
+        entity = client.post("/api/entities", headers=headers, json={"name": "Docker VM", "type": "host"}).json()
+        response = client.put(
+            f"/api/entities/{entity['id']}/uplink", headers=headers,
+            json={"physical_device_id": "switch-01"},
+        )
+        assert response.status_code == 200, response.text
+
+
+def test_a_manual_device_can_get_an_uplink_too() -> None:
+    """Overnemen als handmatig device mag geen doodlopende weg zijn."""
+    entity_id = discovery("wifi-5", "laptop", ip_address="192.168.1.97")
+    with TestClient(app) as client:
+        headers = login(client)
+        client.post(f"/api/entities/{entity_id}/promote", headers=headers, json={"type": "host"})
+        response = client.put(
+            f"/api/entities/{entity_id}/uplink", headers=headers,
+            json={"physical_device_id": "deco-02"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["origin"] == "manual"
+        assert response.json()["uplink_device_id"] == "deco-02"

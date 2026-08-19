@@ -776,10 +776,16 @@ def set_entity_uplink(entity_id: str, payload: UplinkInput, auth: AuthContext = 
     Een echte kabel blijft de sterkere koppeling: bestaat die al, dan zou een
     uplink ernaast alleen maar verwarren.
     """
-    entity = database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,))
+    entity = database.fetch_one("SELECT id,type FROM entities WHERE id=?", (entity_id,))
     if not entity:
         raise HTTPException(404, "Device niet gevonden")
     device_id = (payload.physical_device_id or "").strip() or None
+    if device_id and not categories.can_attach(entity["type"]):
+        raise HTTPException(
+            409,
+            f"Een {categories.label_for(entity['type']).lower()} heeft geen netwerkpoort; "
+            "koppel de host waarop het draait.",
+        )
     if device_id:
         device = database.fetch_one("SELECT id FROM physical_devices WHERE id=?", (device_id,))
         if not device:

@@ -201,8 +201,10 @@ function renderPatch() {
 function renderUnpatched() {
   const linked = new Set(state.data.physical_devices.flatMap(device =>
     device.ports.filter(port => port.link_kind === "entity").map(port => port.entity_id)));
+  // Alleen dingen met een eigen netwerkpoort; een container of monitor hangt
+  // aan zijn host, niet aan een switch. De regel staat in categories.py.
   const free = state.data.entities.filter(entity =>
-    !linked.has(entity.id) && !entity.archived && !["service", "container", "vm", "lxc"].includes(entity.type));
+    !linked.has(entity.id) && !entity.archived && canAttach(entity.type));
   $("#unpatched-count").textContent = `${free.length} vrij`;
   $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
     <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
@@ -442,6 +444,8 @@ function providerIcon(type) { return ({dhcp_arp:"⌁",uptime_kuma:"◉",glances:
 function category(key) { return (state.data.categories || []).find(item => item.key === key); }
 function entityIcon(key) { return category(key)?.icon || "○"; }
 function categoryLabel(key) { return category(key)?.label || key || "Onbekend"; }
+// Onbekende categorieën mogen wel koppelen: tegenhouden is vervelender.
+function canAttach(key) { const item = category(key); return item ? item.attachable : true; }
 function categoryOptions(selected, {physical = false} = {}) {
   return (state.data.categories || []).filter(item => item.physical === physical)
     .map(item => `<option value="${esc(item.key)}"${item.key === selected ? " selected" : ""}>${esc(item.label)}</option>`).join("");
@@ -591,6 +595,14 @@ function openEntity(entityId=""){
   const form=$("#entity-form"),entity=entityId?state.data.entities.find(item=>item.id===entityId):null;form.reset();form.elements.entity_id.value=entityId;
   $("#entity-dialog-title").textContent=entity?"Device bewerken":"Device toevoegen";
   $("#entity-type-select").innerHTML=categoryOptions(entity?.type||"device");
+  // Een kabel is preciezer dan "hangt eraan"; zit die er al, dan is dit veld
+  // niet de plek om dat te wijzigen.
+  const cabled=entity&&state.data.physical_devices.some(device=>device.ports.some(port=>port.entity_id===entity.id));
+  $("#entity-uplink-select").innerHTML=`<option value="">— nergens aan —</option>${state.data.physical_devices.map(device=>
+    `<option value="${esc(device.id)}"${device.id===entity?.uplink_device_id?" selected":""}>${esc(device.name)} · ${esc(categoryLabel(device.type))}</option>`).join("")}`;
+  $("#entity-uplink-select").disabled=Boolean(cabled);
+  $("#entity-uplink-hint").textContent=cabled?"Dit device zit met een kabel op een poort; koppel die eerst los.":"Voor wifi-clients, of als je de poort niet weet.";
+  $("#entity-uplink-field").classList.toggle("hidden",!canAttach(entity?.type||"device"));
   if(entity){["name","type","hostname","ip_address","mac_address","notes"].forEach(key=>form.elements[key].value=entity[key]||"");}
   $("#entity-dialog").showModal();
 }
@@ -733,7 +745,17 @@ $$('[data-layer]').forEach(input => input.addEventListener("change", renderTopol
 
 $("#entity-form").addEventListener("submit", async event => {
   event.preventDefault(); const form=event.currentTarget, payload = Object.fromEntries(new FormData(form)),entityId=payload.entity_id;delete payload.entity_id;
-  try { await api(entityId?`/api/entities/${entityId}`:"/api/entities", {method:entityId?"PATCH":"POST", body:JSON.stringify(payload)}); form.reset(); $("#entity-dialog").close(); await loadData(true); toast(entityId?"Device bijgewerkt":"Device toegevoegd"); } catch(error){toast(error.message,"error");}
+  // De uplink is een eigen endpoint: die kent de kabelregel en mag niet
+  // stilletjes meeliften op een naamswijziging.
+  const uplink=payload.uplink_device_id||null;delete payload.uplink_device_id;
+  const uplinkDisabled=$("#entity-uplink-select").disabled;
+  try {
+    const saved = await api(entityId?`/api/entities/${entityId}`:"/api/entities", {method:entityId?"PATCH":"POST", body:JSON.stringify(payload)});
+    if (!uplinkDisabled) {
+      await api(`/api/entities/${encodeURIComponent(entityId||saved.id)}/uplink`, {method:"PUT", body:JSON.stringify({physical_device_id:uplink})});
+    }
+    form.reset(); $("#entity-dialog").close(); await loadData(true); toast(entityId?"Device bijgewerkt":"Device toegevoegd");
+  } catch(error){toast(error.message,"error");}
 });
 
 $("#physical-form").addEventListener("submit", async event => {
@@ -1006,7 +1028,9 @@ async function renderAssignList(container) {
       </select>
       <select data-assign-category class="hidden" aria-label="Categorie">${categoryOptions(row.type)}</select>
       <select data-assign-target class="hidden" aria-label="Doeldevice">${targets.map(entity => `<option value="${esc(entity.id)}">${esc(entity.name)}</option>`).join("")}</select>
-      <select data-assign-place aria-label="Plek">${places}</select>
+      ${canAttach(row.type)
+        ? `<select data-assign-place aria-label="Plek">${places}</select>`
+        : `<span class="muted tiny">Draait op een host, geen eigen poort</span>`}
     </div>`).join("") : `<div class="empty-state">Geen open discoveries. Scan het netwerk of synchroniseer een databron.</div>`;
   // Bestaande uplink voorselecteren, anders lijkt hij bij elke opening weg.
   rows.forEach(row => {
@@ -1021,7 +1045,7 @@ async function applyAssignments(container, stateLabel) {
   let created = 0, merged = 0, ignored = 0, placed = 0, failed = 0;
   for (const row of rows) {
     const id = row.dataset.assignId, action = $("[data-assign-action]", row).value;
-    const place = $("[data-assign-place]", row).value;
+    const place = $("[data-assign-place]", row)?.value || "";
     try {
       if (action === "promote") {
         await api(`/api/entities/${encodeURIComponent(id)}/promote`, {method:"POST", body:JSON.stringify({
@@ -1087,7 +1111,7 @@ document.addEventListener("change", event => {
   const row = select.closest("[data-assign-id]");
   $("[data-assign-target]", row).classList.toggle("hidden", select.value !== "merge");
   $("[data-assign-category]", row).classList.toggle("hidden", select.value !== "promote");
-  $("[data-assign-place]", row).classList.toggle("hidden", select.value === "ignore" || select.value === "merge");
+  $("[data-assign-place]", row)?.classList.toggle("hidden", select.value === "ignore" || select.value === "merge");
 });
 
 /* --------------------------------------------------- drag-and-drop koppelen */

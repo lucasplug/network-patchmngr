@@ -11,6 +11,7 @@ issue-tracker — één regel per punt volstaat.
 | 3 | Glances draait op meerdere machines, maar er kan er maar één in | De adapter kon al een lijst endpoints aan; alleen de UI propte er één in en koppelde op hostnaam | Endpointlijst in het providerdialoog, met per endpoint een expliciet device (`entity_id`) |
 | 4 | Gevonden apparaten zijn niet aan een Deco te koppelen | Koppelen was uitsluitend "kabel van poort naar device". Een Deco heeft drie poorten en tientallen wifi-clients, dus daar paste niets | `entities.uplink_device_id`: hangt aan een netwerkapparaat zónder poort. Kabel wint als die er is |
 | 5 | De rol van een apparaat is niet af te lezen | `type` was een vrij tekstveld met twee losse keuzelijsten die geen van beide dekten wat providers opleveren | Eén lijst in `patch_manager/categories.py`, gebruikt voor keuzelijsten, iconen en labels |
+| 6 | Kan ik een Glances- of Uptime Kuma-entity aan switch 1 of 2 hangen? | Deels. De poortloze uplink accepteerde ook containers, VM's en monitors — die hebben geen netwerkpoort. En een overgenomen (handmatig) device kon helemaal geen uplink meer krijgen, want het toewijsscherm toont alleen discoveries | `attachable` per categorie, afgedwongen in `PUT /uplink`; uplinkveld in het devicedialoog |
 
 ## Bijvangst bij deze punten
 

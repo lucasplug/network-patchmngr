@@ -147,6 +147,7 @@
       <label>Naam<input name="name" required placeholder="bijv. NAS DS223"></label>
       <div class="field-row"><label>Categorie<select name="type" id="entity-type-select"></select></label><label>Hostname<input name="hostname"></label></div>
       <div class="field-row"><label>IP-adres<input name="ip_address" inputmode="decimal"></label><label>MAC-adres<input name="mac_address" placeholder="aa:bb:cc:dd:ee:ff"></label></div>
+      <label id="entity-uplink-field">Hangt aan (zonder poort)<select name="uplink_device_id" id="entity-uplink-select"></select><small class="muted" id="entity-uplink-hint"></small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
     </form>
