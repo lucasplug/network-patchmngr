@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__
+from . import __version__, categories
 from .db import Database, expires_in, utcnow
 from .providers import ProviderManager
 from .secret_store import SecretStore
@@ -72,6 +72,12 @@ class AuthContext:
 class Credentials(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=12, max_length=256)
+
+
+class UplinkInput(BaseModel):
+    """Aan welk netwerkapparaat iets hangt zonder dat er een poort bij hoort."""
+
+    physical_device_id: str | None = Field(default=None, max_length=64)
 
 
 class EntityInput(BaseModel):
@@ -537,14 +543,17 @@ def inventory_counts() -> dict[str, Any]:
         for row in database.fetch_all("SELECT b_entity_id FROM cables WHERE b_entity_id IS NOT NULL")
     }
     open_discoveries = database.fetch_all(
-        "SELECT id FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"
+        "SELECT id,uplink_device_id FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"
     )
     return {
         "ports": database.fetch_one("SELECT COUNT(*) AS n FROM ports WHERE side='front'")["n"],
         "patched": database.fetch_one("SELECT COUNT(*) AS n FROM cables")["n"],
         "up": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='up'")["n"],
         "down": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='down'")["n"],
-        "unlinked": sum(1 for row in open_discoveries if row["id"] not in linked),
+        "unlinked": sum(
+            1 for row in open_discoveries
+            if row["id"] not in linked and not row["uplink_device_id"]
+        ),
         "conflicts": database.fetch_one("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'")["n"],
     }
 
@@ -561,6 +570,7 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     counts = inventory_counts()
     return {
         "site": {"title": app_title(), "timezone": "Europe/Amsterdam"},
+        "categories": categories.payload(),
         "counts": counts,
         "physical_devices": nested_physical_devices(),
         "entities": entities,
@@ -689,15 +699,19 @@ def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
     }
     rows = database.fetch_all(
         """SELECT e.id,e.name,e.type,e.status,e.ip_address,e.mac_address,e.hostname,e.vendor,
-                  e.first_seen_at,e.last_seen_at,
+                  e.first_seen_at,e.last_seen_at,e.uplink_device_id,d.name AS uplink_device_name,
+                  d.type AS uplink_device_type,
                   (SELECT GROUP_CONCAT(p.name,', ') FROM provider_records pr
                      JOIN providers p ON p.id=pr.provider_id WHERE pr.entity_id=e.id) AS sources
            FROM entities e
+           LEFT JOIN physical_devices d ON d.id=e.uplink_device_id
            WHERE e.origin='discovered' AND e.ignored=0 AND e.archived=0
            ORDER BY e.first_seen_at DESC,e.name"""
     )
     for row in rows:
-        row["linked"] = row["id"] in linked
+        # Een poortloze uplink telt net zo goed als toegewezen: het ding heeft
+        # een plek gekregen, alleen zonder kabel.
+        row["linked"] = row["id"] in linked or bool(row["uplink_device_id"])
     return rows
 
 
@@ -752,6 +766,33 @@ def update_entity(entity_id: str, payload: EntityInput, auth: AuthContext = Depe
              payload.mac_address.lower() if payload.mac_address else None, payload.hostname, payload.notes, utcnow(), entity_id),
         )
     database.audit(auth.user_id, "entity.update", "entity", entity_id, payload.model_dump())
+    return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+
+
+@app.put("/api/entities/{entity_id}/uplink")
+def set_entity_uplink(entity_id: str, payload: UplinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Hang een device aan een netwerkapparaat zonder poort (wifi, of poort onbekend).
+
+    Een echte kabel blijft de sterkere koppeling: bestaat die al, dan zou een
+    uplink ernaast alleen maar verwarren.
+    """
+    entity = database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,))
+    if not entity:
+        raise HTTPException(404, "Device niet gevonden")
+    device_id = (payload.physical_device_id or "").strip() or None
+    if device_id:
+        device = database.fetch_one("SELECT id FROM physical_devices WHERE id=?", (device_id,))
+        if not device:
+            raise HTTPException(404, "Netwerkapparaat niet gevonden")
+        cable = database.fetch_one("SELECT id FROM cables WHERE b_entity_id=?", (entity_id,))
+        if cable:
+            raise HTTPException(409, "Dit device zit al met een kabel op een poort; koppel die eerst los")
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE entities SET uplink_device_id=?,updated_at=? WHERE id=?",
+            (device_id, utcnow(), entity_id),
+        )
+    database.audit(auth.user_id, "entity.uplink", "entity", entity_id, {"physical_device_id": device_id})
     return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
 
 
@@ -1011,6 +1052,12 @@ def insert_cable(payload: CableInput, user_id: str) -> dict[str, Any]:
             (cable_id, payload.a_port_id, payload.b_port_id, payload.b_entity_id,
              payload.label, payload.color, payload.notes, utcnow(), user_id),
         )
+        # Een kabel is preciezer dan "hangt ergens aan": de losse uplink zou
+        # er alleen naast blijven staan en tegenspreken waar het ding zit.
+        if payload.b_entity_id:
+            connection.execute(
+                "UPDATE entities SET uplink_device_id=NULL WHERE id=?", (payload.b_entity_id,)
+            )
     return database.fetch_one("SELECT * FROM cables WHERE id=?", (cable_id,))
 
 

@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS entities (
   mac_address TEXT,
   hostname TEXT,
   parent_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  -- Hangt aan dit netwerkapparaat zonder dat er een poort bij hoort: een
+  -- wifi-client op een Deco, of een switchpoort die je (nog) niet weet. Een
+  -- echte kabel blijft een rij in `cables`; die wint bij het tekenen.
+  uplink_device_id TEXT REFERENCES physical_devices(id) ON DELETE SET NULL,
   vendor TEXT,
   ignored INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
@@ -338,7 +342,11 @@ DEVICE_TEMPLATES = [
 PROVIDER_TEMPLATES = [
     ("dhcp-arp", "dhcp_arp", "DHCP / ARP discovery", 300, {"subnets": ["192.168.1.0/24"], "scan": True}),
     ("uptime-kuma", "uptime_kuma", "Uptime Kuma", 60, {"base_url": "", "status_page_slug": "homelab"}),
-    ("glances", "glances", "Glances", 60, {"endpoints": [{"name": "docker-vm", "url": "http://192.168.1.12:61208/api/4"}]}),
+    # entity_id per endpoint: Glances draait op meerdere machines en de
+    # hostnaam die het teruggeeft komt niet altijd overeen met hoe het
+    # apparaat hier heet. Daarom wijs je het device zelf aan; matchen op
+    # hostnaam leverde dubbele hosts op.
+    ("glances", "glances", "Glances", 60, {"endpoints": [{"name": "docker-vm", "url": "http://192.168.1.12:61208/api/4", "entity_id": None}]}),
     ("portainer", "portainer", "Portainer", 60, {"base_url": "https://192.168.1.12:9443", "verify_tls": False}),
     ("proxmox", "proxmox", "Proxmox VE", 60, {"base_url": "https://192.168.1.100:8006", "user": "readonly@pve", "token_name": "patchmanager", "verify_tls": False}),
     ("adguard", "adguard", "AdGuard Home", 300, {"base_url": "http://192.168.1.12:3000", "import_clients": True, "import_rewrites": True, "verify_tls": True}),

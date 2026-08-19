@@ -106,6 +106,27 @@ def sync_topology_catalog(database: Database) -> None:
                  f"entity:{entity_id}", "physical", port["label"], now, now),
             )
 
+        # Poortloze uplinks: wifi-clients op een Deco, of een switchpoort die
+        # nog niet bekend is. Zelfde herkomst 'patch' zodat ze mee opgeruimd
+        # worden, maar een eigen relation_type zodat de tekening ze anders
+        # weergeeft dan een echte kabel.
+        uplinks = connection.execute(
+            """SELECT e.id,e.uplink_device_id,d.type AS device_type FROM entities e
+               JOIN physical_devices d ON d.id=e.uplink_device_id
+               WHERE e.uplink_device_id IS NOT NULL AND e.ignored=0 AND e.archived=0"""
+        ).fetchall()
+        for entity in uplinks:
+            wireless = entity["device_type"] in ("mesh_ap", "access_point")
+            connection.execute(
+                """INSERT OR REPLACE INTO topology_relations
+                   (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'patch',1,?,?)""",
+                # Niet "uplink": dat type bestond al voor de internet-routerlijn.
+                (f"uplink:{entity['id']}", f"physical:{entity['uplink_device_id']}",
+                 f"entity:{entity['id']}", "wireless" if wireless else "portless",
+                 "wifi" if wireless else "poort onbekend", now, now),
+            )
+
 
 def topology_payload(database: Database) -> dict[str, Any]:
     sync_topology_catalog(database)

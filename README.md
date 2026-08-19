@@ -76,7 +76,7 @@ Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de UR
 |---|---|---|
 | DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde `/24`-subnets; maximaal 1024 adressen per subnet |
 | Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints; de slug van de statuspagina hoort erbij |
-| Glances | gebruikersnaam en wachtwoord | Ondersteunt meerdere API-v4-endpoints |
+| Glances | gebruikersnaam en wachtwoord | Eén endpoint per machine, elk gekoppeld aan een device dat je zelf aanwijst |
 | Portainer | API-key | Gebruik een aparte gebruiker met minimale environmentrechten |
 | Proxmox | API-tokengeheim | Gebruik een read-only API-token; vul ook de gebruiker en het token-ID in |
 | AdGuard Home | gebruikersnaam en wachtwoord | Importeert clients en DNS-rewrites via `/control/clients` en `/control/rewrite/list` |
@@ -93,11 +93,18 @@ AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de b
 ## Topologie en relaties
 
 - Een fysieke poortkoppeling tekent automatisch een fysieke relatie.
+- Een device kan ook zónder poort aan een netwerkapparaat hangen: wifi-clients op een Deco, of een switchpoort die je nog niet weet. Die verbinding is onderbroken getekend.
 - Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.
 - Relaties die niet betrouwbaar zijn af te leiden — bijvoorbeeld de onderlinge bekabeling van Deco-units zonder SNMP — teken je zelf in **Topologie → Bewerken → Relatie**.
 - Handmatige posities, groepen en parents blijven behouden bij een volgende providersynchronisatie.
 - In bewerkmodus selecteer je meerdere nodes met shift-klik. De selectie kan samen worden versleept of direct in een nieuwe groep worden geplaatst.
 - Handmatige groepen zijn verwijderbaar; kinderen worden daarbij uit de groep gehaald. Met **Ongedaan** herstel je de laatste topologiewijziging.
+
+## Categorieën
+
+Elk device en elk netwerkapparaat heeft een categorie die zijn rol benoemt: switch, mesh access point, patchpanel, host, VM, LXC, container, service, NAS, camera, printer, IoT, router of device. De lijst staat op één plek (`patch_manager/categories.py`) en vult de keuzelijsten, iconen en labels in de hele app. Categorieën met poorten horen bij netwerkapparaten, de rest bij devices; die scheiding zit in de lijst zelf.
+
+Providers bepalen de categorie van een discovery, dus die kan bij elke synchronisatie veranderen. Neem je een discovery over als handmatig device, dan is jouw keuze definitief.
 
 ## Discoveries en bronkoppelingen
 

@@ -102,6 +102,8 @@
           <div id="providers-grid" class="providers-grid"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Hangt aan een netwerkapparaat (geen poort)</span><span class="muted" id="uplink-count"></span></div>
+          <div id="uplinks-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Genegeerd & gearchiveerd</span><span class="muted" id="inactive-discovery-count"></span></div>
           <div id="inactive-discoveries-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Expliciete bronkoppelingen</span><span class="muted" id="mapping-count"></span></div>
@@ -143,7 +145,7 @@
     <form id="entity-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Handmatig device</p><h2 id="entity-dialog-title">Device toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="entity_id">
       <label>Naam<input name="name" required placeholder="bijv. NAS DS223"></label>
-      <div class="field-row"><label>Type<select name="type"><option value="device">Device</option><option value="host">Host</option><option value="nas">NAS</option><option value="camera">Camera</option><option value="router">Router/modem</option><option value="printer">Printer</option><option value="iot">IoT</option></select></label><label>Hostname<input name="hostname"></label></div>
+      <div class="field-row"><label>Categorie<select name="type" id="entity-type-select"></select></label><label>Hostname<input name="hostname"></label></div>
       <div class="field-row"><label>IP-adres<input name="ip_address" inputmode="decimal"></label><label>MAC-adres<input name="mac_address" placeholder="aa:bb:cc:dd:ee:ff"></label></div>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
@@ -154,7 +156,7 @@
     <form id="physical-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Patchapparaat</p><h2 id="physical-dialog-title">Netwerkapparaat toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div><input type="hidden" name="device_id">
       <label>Naam<input name="name" required placeholder="bijv. Patchpanel zolder"></label>
-      <div class="field-row"><label>Type<select name="type"><option value="switch">Switch</option><option value="mesh_ap">Mesh access point</option><option value="access_point">Access point</option><option value="patch_panel">Patchpanel</option></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
+      <div class="field-row"><label>Categorie<select name="type" id="physical-type-select"></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
       <div class="field-row"><label>Model<input name="model"></label><label>Locatie<input name="location"></label></div>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
@@ -166,6 +168,11 @@
       <div class="modal-head"><div><p class="eyebrow">Providerconfiguratie</p><h2 id="provider-dialog-title">Provider</h2></div><button type="button" class="icon-button modal-close">×</button></div>
       <input type="hidden" name="provider_id">
       <div class="field-row"><label class="toggle-label"><input name="enabled" type="checkbox"><span>Provider ingeschakeld</span></label><label>Pollinterval (seconden)<input name="poll_interval_seconds" type="number" min="15" max="86400"></label></div>
+      <div id="provider-endpoints" class="stack hidden">
+        <div class="section-bar"><span>Glances-endpoints</span><button type="button" class="button micro" id="endpoint-add">+ Endpoint</button></div>
+        <div id="endpoint-rows" class="stack"></div>
+        <p class="muted tiny">Eén regel per machine waar Glances draait. Kies per endpoint welk device het meet; op hostnaam matchen leverde dubbele hosts op.</p>
+      </div>
       <label>Configuratie (JSON)<textarea class="code-input" name="config" rows="14" spellcheck="false"></textarea></label>
       <div id="provider-credentials" class="stack"></div>
       <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>

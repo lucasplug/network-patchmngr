@@ -154,6 +154,7 @@ class ProviderManager:
         mac_address: str | None = None,
         hostname: str | None = None,
         parent_id: str | None = None,
+        bind_entity_id: str | None = None,
     ) -> str:
         now = utcnow()
         mac_address = normalize_mac(mac_address)
@@ -163,7 +164,12 @@ class ProviderManager:
             (provider_id, external_id),
         )
         entity = None
-        if existing_record and existing_record["entity_id"]:
+        # Een expliciete koppeling uit de configuratie (Glances-endpoint → device)
+        # gaat vóór alle raadwerk hieronder. Bestaat het device niet meer, dan
+        # valt hij terug op de normale matching in plaats van te crashen.
+        if bind_entity_id:
+            entity = self.database.fetch_one("SELECT * FROM entities WHERE id=?", (bind_entity_id,))
+        if not entity and existing_record and existing_record["entity_id"]:
             entity = self.database.fetch_one("SELECT * FROM entities WHERE id=?", (existing_record["entity_id"],))
         if not entity and mac_address:
             entity = self.database.fetch_one("SELECT * FROM entities WHERE lower(mac_address)=?", (mac_address,))
@@ -198,7 +204,11 @@ class ProviderManager:
                         (name, entity_type, status, now, ip_address, mac_address, hostname, parent_id, vendor, now, now, entity_id),
                     )
             else:
-                self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
+                # Bij een expliciete koppeling is een afwijkende naam geen
+                # conflict maar de bedoeling: je hebt zelf gezegd dat dit
+                # hetzelfde apparaat is.
+                if not bind_entity_id:
+                    self._record_manual_conflicts(entity, provider_id, {"name": name, "ip_address": ip_address, "mac_address": mac_address})
                 with self.database.transaction() as connection:
                     connection.execute(
                         "UPDATE entities SET status=?,status_updated_at=?,last_seen_at=? WHERE id=?",
@@ -358,11 +368,20 @@ class ProviderManager:
         password = credentials.get("password")
         if username and password:
             auth = (username, password)
+        endpoints = config.get("endpoints", []) or []
+        missing = [
+            endpoint.get("name") or endpoint.get("url") or "naamloos"
+            for endpoint in endpoints
+            if str(endpoint.get("url", "")).strip() and not endpoint.get("entity_id")
+        ]
+        if missing:
+            raise ValueError(f"Geen device gekozen voor endpoint: {', '.join(missing)}")
         async with httpx.AsyncClient(timeout=15, auth=auth) as client:
-            for endpoint in config.get("endpoints", []):
+            for endpoint in endpoints:
                 base_url = str(endpoint.get("url", "")).rstrip("/")
                 if not base_url:
                     continue
+                bind_entity_id = endpoint.get("entity_id")
                 responses = await asyncio.gather(
                     client.get(f"{base_url}/system"), client.get(f"{base_url}/ip"),
                     client.get(f"{base_url}/containers"), client.get(f"{base_url}/quicklook"),
@@ -377,16 +396,19 @@ class ProviderManager:
                 memory = responses[4].json() if not isinstance(responses[4], Exception) and responses[4].status_code == 200 else {}
                 host_id = await asyncio.to_thread(
                     self._store_record,
-                    provider["id"], f"host:{host_name}", "host",
+                    # Het endpoint is de sleutel, niet de hostnaam: verandert de
+                    # hostnaam van de machine, dan blijft dit dezelfde rij.
+                    provider["id"], f"host:{bind_entity_id}", "host",
                     {"system": system, "ip": ip_data, "quicklook": quicklook, "memory": memory},
                     name=host_name, entity_type="host", status="up", ip_address=ip_data.get("address"), hostname=host_name,
+                    bind_entity_id=bind_entity_id,
                 )
                 count += 1
                 if not isinstance(responses[2], Exception) and responses[2].status_code == 200:
                     for container in responses[2].json():
                         await asyncio.to_thread(
                             self._store_record,
-                            provider["id"], f"container:{host_name}:{container.get('id') or container.get('name')}",
+                            provider["id"], f"container:{bind_entity_id}:{container.get('id') or container.get('name')}",
                             "container", container, name=container.get("name") or "container", entity_type="container",
                             status="up" if str(container.get("status", "")).lower().startswith("up") else "down",
                             parent_id=host_id,
@@ -648,18 +670,38 @@ class ProviderManager:
         auth = None
         if credentials.get("username") and credentials.get("password"):
             auth = (credentials["username"], credentials["password"])
+        # Test alle endpoints en meld ze per stuk: met meerdere machines wil je
+        # weten wélke er stuk is, niet dat er "iets" niet werkt.
         found: list[str] = []
+        working = 0
         async with httpx.AsyncClient(timeout=15, auth=auth) as client:
             for endpoint in endpoints:
                 base_url = str(endpoint.get("url", "")).rstrip("/")
                 if not base_url:
                     continue
-                response = await client.get(f"{base_url}/system")
-                response.raise_for_status()
-                containers = await client.get(f"{base_url}/containers")
-                count = len(containers.json()) if containers.status_code == 200 else 0
-                found.append(f"{response.json().get('hostname') or base_url} ({count} container(s))")
-        return "Hosts: " + ", ".join(found) if found else "Geen bruikbare endpoints"
+                title = endpoint.get("name") or base_url
+                if not endpoint.get("entity_id"):
+                    found.append(f"{title}: geen device gekozen")
+                    continue
+                try:
+                    response = await client.get(f"{base_url}/system")
+                    response.raise_for_status()
+                    containers = await client.get(f"{base_url}/containers")
+                    count = len(containers.json()) if containers.status_code == 200 else 0
+                except httpx.HTTPStatusError as exc:
+                    found.append(f"{title}: HTTP {exc.response.status_code}")
+                except httpx.HTTPError as exc:
+                    found.append(f"{title}: {exc.__class__.__name__}")
+                else:
+                    working += 1
+                    found.append(f"{title} → {response.json().get('hostname') or base_url} ({count} container(s))")
+        if not found:
+            raise ValueError("Geen bruikbare endpoints")
+        # Eén kapotte machine tussen vijf werkende blokkeert het opslaan niet;
+        # niets dat werkt wél.
+        if not working:
+            raise ValueError(" · ".join(found))
+        return " · ".join(found)
 
     async def _test_adguard(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
         base_url = str(config.get("base_url", "")).rstrip("/")
