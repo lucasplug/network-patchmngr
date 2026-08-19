@@ -66,6 +66,16 @@ issue-tracker — één regel per punt volstaat.
   een machine, dan blijft het dezelfde rij. Een afwijkende naam levert bij een
   expliciete koppeling ook geen conflict meer op — dat is juist de bedoeling.
 
+## Schema wijzigen: vanaf nu met migratie
+
+Sinds `SCHEMA_VERSION = 2` draagt de database een versienummer en werkt hij
+zichzelf bij bij het starten. Een nieuwe kolom of een gewijzigde constraint
+hoort in `MIGRATIONS`; een nieuwe tabel niet, want `CREATE TABLE IF NOT EXISTS`
+regelt die zelf. `tests/test_migrations.py` bouwt een database met het oude
+schema, vult hem met data en controleert dat er niets verloren gaat.
+
+Alles hieronder is nog van vóór het register.
+
 ## Schema gewijzigd
 
 Punt 3, 4, 7, 8, 9 en 11 wijzigen `db.py`: `entities.uplink_device_id`,

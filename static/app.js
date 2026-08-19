@@ -21,7 +21,10 @@ function errorMessage(body, status) {
 }
 
 async function api(path, options = {}) {
-  const headers = {"Content-Type":"application/json", ...(options.headers || {})};
+  // Bij FormData moet de browser zelf de Content-Type met boundary zetten;
+  // die hier invullen breekt de upload.
+  const isForm = options.body instanceof FormData;
+  const headers = {...(isForm ? {} : {"Content-Type":"application/json"}), ...(options.headers || {})};
   if (state.csrf && options.method && !["GET", "HEAD"].includes(options.method)) headers["X-CSRF-Token"] = state.csrf;
   const response = await fetch(path, {...options, headers});
   const contentType = response.headers.get("content-type") || "";
@@ -132,6 +135,7 @@ function renderAll() {
   renderApps();
   renderTopology();
   renderAdmin();
+  renderChanges();
   renderSpeedtest();
 }
 
@@ -179,7 +183,9 @@ function deviceFace(device) {
   return `
     <article class="device-card" data-device-card="${esc(device.id)}">
       <header class="device-head">
-        <div><div class="device-title">${statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
+        <div><div class="device-title">${device.monitor_entity_id
+          ? `<button class="status-button" data-device-history="${esc(device.id)}" title="Uptime van ${esc(device.monitor_name || "de monitor")}">${statusDot(device.status)}</button>`
+          : statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
         <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
       </header>
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
@@ -539,6 +545,97 @@ function closeDrawer() {
   $("#port-drawer").setAttribute("aria-hidden", "true");
 }
 
+/* --------------------------------------------------------------- zoeken */
+// Eén veld over apparaten, netwerkapparaten en apps. Springt naar het juiste
+// tabblad en licht de treffer op; geen eigen resultatenpagina.
+let searchTimer = null;
+
+$("#search-input").addEventListener("input", event => {
+  const term = event.currentTarget.value;
+  clearTimeout(searchTimer);
+  // Even wachten: bij elke toetsaanslag zoeken belast de database onnodig.
+  searchTimer = setTimeout(() => runSearch(term), 180);
+});
+
+async function runSearch(term) {
+  const box = $("#search-results");
+  if (term.trim().length < 2) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  try {
+    const rows = await api(`/api/search?q=${encodeURIComponent(term)}`);
+    box.innerHTML = rows.length ? rows.map(row => `
+      <button class="search-hit" data-hit-kind="${esc(row.kind)}" data-hit-id="${esc(row.id)}" data-hit-goto="${esc(row.goto)}">
+        <span class="search-kind">${row.kind === "app" ? "app" : row.kind === "physical" ? "apparaat" : "device"}</span>
+        <span class="search-label">${esc(row.label)}</span>
+        <span class="search-sub">${esc(row.sub || "")}</span>
+        ${row.status ? statusDot(row.status) : ""}
+      </button>`).join("") : `<div class="empty-state tiny">Niets gevonden.</div>`;
+    box.classList.remove("hidden");
+  } catch { box.classList.add("hidden"); }
+}
+
+$("#search-results").addEventListener("click", event => {
+  const hit = event.target.closest("[data-hit-id]");
+  if (!hit) return;
+  $("#search-results").classList.add("hidden");
+  $("#search-input").value = "";
+  switchTab(hit.dataset.hitGoto);
+  if (hit.dataset.hitKind === "entity") openEntityDrawer(hit.dataset.hitId);
+  else if (hit.dataset.hitKind === "physical") {
+    const card = document.querySelector(`[data-device-card="${CSS.escape(hit.dataset.hitId)}"]`);
+    if (card) { card.scrollIntoView({behavior: "smooth", block: "center"}); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 1200); }
+  }
+});
+
+document.addEventListener("click", event => {
+  if (!event.target.closest(".search-box")) $("#search-results").classList.add("hidden");
+});
+
+/* ------------------------------------------------- recente veranderingen */
+// De auditlog zegt wat jíj deed; dit zegt wat het netwerk deed.
+async function renderChanges() {
+  const days = $("#changes-days").value;
+  try {
+    const data = await api(`/api/changes?days=${encodeURIComponent(days)}`);
+    const row = (item, kind) => `
+      <div class="data-row">
+        <div class="data-main"><span class="data-icon">${entityIcon(item.type)}</span>
+          <div><strong>${esc(item.name)}</strong><span>${esc(categoryLabel(item.type))}${item.vendor ? ` · ${esc(item.vendor)}` : ""}</span></div></div>
+        <div><span class="data-cell-label">${kind === "new" ? "Verschenen" : "Laatst gezien"}</span><br>${formatTime(kind === "new" ? item.first_seen_at : item.last_seen_at)}</div>
+        <div>${esc(item.ip_address || item.mac_address || "—")}</div>
+        <div><span class="pill ${kind === "new" ? "new" : "gone"}">${kind === "new" ? "nieuw" : "weg"}</span></div>
+      </div>`;
+    const parts = [...data.appeared.map(item => row(item, "new")), ...data.vanished.map(item => row(item, "gone"))];
+    $("#changes-list").innerHTML = parts.length ? parts.join("") : `<div class="empty-state">Niets veranderd in deze periode.</div>`;
+  } catch { $("#changes-list").innerHTML = `<div class="empty-state">Kon veranderingen niet ophalen.</div>`; }
+}
+
+$("#changes-days").addEventListener("change", renderChanges);
+
+/* ----------------------------------------------------- CSV en printen */
+$("#import-csv-button").addEventListener("click", () => $("#import-csv-file").click());
+
+$("#import-csv-file").addEventListener("change", async event => {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+  if (!file) return;
+  const body = new FormData();
+  body.append("file", file);
+  try {
+    const result = await api("/api/entities/import-csv", {method: "POST", body});
+    await loadData(true);
+    toast(`${result.created} aangemaakt · ${result.updated} bijgewerkt${result.problems.length ? ` · ${result.problems.length} probleem(en)` : ""}`);
+    if (result.problems.length) alert(`Niet alle regels konden worden gelezen:\n\n${result.problems.join("\n")}`);
+  } catch (error) { toast(error.message, "error"); }
+  input.value = "";
+});
+
+$("#print-patch").addEventListener("click", () => {
+  // De printstylesheet laat alleen de patchview staan; zo hoeft er geen
+  // tweede weergave onderhouden te worden.
+  switchTab("patch");
+  setTimeout(() => window.print(), 80);
+});
+
 /* ------------------------------------------------------------------ apps */
 // Snelkoppelingen naar eigen diensten. De status komt van dezelfde
 // monitor-entities als bij netwerkapparaten: één mechanisme, niet twee.
@@ -857,6 +954,13 @@ document.addEventListener("click", async event => {
       try{await api(`/api/providers/${encodeURIComponent(provider.id)}?confirm=${encodeURIComponent(provider.name)}`,{method:"DELETE"});await loadData(true);toast("Databron verwijderd");}
       catch(error){toast(error.message,"error");}
     }
+  }
+  const deviceHistory=event.target.closest("[data-device-history]");
+  if(deviceHistory){
+    // De historie van een netwerkapparaat ís die van zijn statusmonitor;
+    // de bestaande lade toont die al.
+    const device=state.data.physical_devices.find(item=>item.id===deviceHistory.dataset.deviceHistory);
+    if(device?.monitor_entity_id)openEntityDrawer(device.monitor_entity_id);
   }
   const uplinkClear=event.target.closest("[data-uplink-clear]");
   if(uplinkClear){const id=uplinkClear.dataset.uplinkClear;try{await api(`/api/entities/${encodeURIComponent(id)}/uplink`,{method:"PUT",body:JSON.stringify({physical_device_id:null})});await loadData(true);toast("Losgekoppeld");}catch(error){toast(error.message,"error");}}

@@ -16,6 +16,11 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
 - **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
 - **Meerdere omgevingen per bron** — twee Portainers, twee AdGuards: elke bron is een eigen instantie met eigen adres, inloggegevens en naam. Toevoegen via **Admin → + Databron**. De laatste van een soort kun je uitzetten maar niet verwijderen.
+- **Bijwerken zonder dataverlies** — de database draagt een schemaversie (`PRAGMA user_version`) en wordt bij het starten automatisch bijgewerkt. Een database van een nieuwere versie wordt geweigerd in plaats van half gemigreerd.
+- **Zoeken** — één veld rechtsboven over apparaten, netwerkapparaten en apps; ook op IP, MAC en hostnaam.
+- **Recente veranderingen** — onder Admin: wat is er verschenen en wat is er al een tijd niet meer gezien. De auditlog zegt wat jíj deed, dit zegt wat het netwerk deed.
+- **CSV-import** — handmatige devices in bulk (`name,type,ip_address,mac_address,hostname,notes`). Bijwerken op MAC of naam, dus hetzelfde bestand twee keer inlezen verdubbelt niets. Onleesbare regels worden benoemd.
+- **Printen** — de patchview op wit, zonder navigatie of zijpaneel, voor in de meterkast.
 - **Apps** — een eigen tabblad met snelkoppelingen naar je diensten, gegroepeerd, met per tegel de status uit Uptime Kuma. Alleen `http(s)`-links worden geaccepteerd.
 - **Licht en donker thema** — de knop rechtsboven wisselt; standaard volgt de app je systeeminstelling. De keuze is per browser, niet per installatie.
 - **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.

@@ -98,3 +98,40 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .app-edit{position:absolute;top:6px;right:6px;width:24px;height:24px;opacity:0;transition:opacity .15s}
 .app-card:hover .app-edit,.app-edit:focus-visible{opacity:1}
 @media(max-width:640px){.app-cards{grid-template-columns:1fr}.app-edit{opacity:1}}
+
+/* Zoeken in de topbar. */
+.search-box{position:relative}
+.search-box input{width:150px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font-size:11px;transition:width .15s}
+.search-box input:focus{width:230px;outline:none;border-color:var(--line-bright)}
+.search-results{position:absolute;z-index:40;top:calc(100% + 6px);right:0;width:340px;max-height:60vh;overflow:auto;padding:5px;border:1px solid var(--line-bright);border-radius:11px;background:var(--surface-strong);box-shadow:var(--shadow)}
+.search-hit{display:grid;grid-template-columns:58px 1fr auto;gap:8px;align-items:center;width:100%;padding:8px 9px;border:0;border-radius:8px;background:none;text-align:left;cursor:pointer}
+.search-hit:hover,.search-hit:focus-visible{background:rgba(var(--tint),.06)}
+.search-kind{color:var(--faint);font-size:8px;letter-spacing:.1em;text-transform:uppercase}
+.search-label{font-family:var(--sans);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-sub{grid-column:2;grid-row:2;color:var(--dim);font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Recente veranderingen. */
+.pill{padding:3px 8px;border-radius:20px;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.pill.new{background:rgba(var(--up-rgb),.14);color:var(--up)}
+.pill.gone{background:rgba(var(--down-rgb),.14);color:var(--down-ink)}
+#changes-days{padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--dim);font-size:10px}
+
+/* Een kaart oplichten na een zoektreffer. */
+.device-card.flash{border-color:var(--accent);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.18)}
+
+/* Printen: alleen het patchschema, op wit, zonder interactie. */
+@media print{
+  :root{--tint:17,24,34;--bg:#fff;--panel:#fff;--surface:#fff;--surface-strong:#fff;--ink:#000;--dim:#333;--faint:#555;--line:#999;--line-bright:#666;--shadow:none}
+  .ambient,.topbar,.tabs,.heading-actions,.unpatched-panel,.row-actions,.device-head-actions,
+  #manual-entities-list,.section-bar .muted,dialog,.toast-stack{display:none!important}
+  body{background:#fff;color:#000}
+  .view{display:none!important}
+  #patch-view.active{display:block!important}
+  .patch-layout{display:block}
+  .device-card{break-inside:avoid;border:1px solid #999;margin-bottom:10px}
+  .glass{backdrop-filter:none}
+  a[href]::after{content:""}
+}
+
+.status-button{padding:0;border:0;background:none;cursor:pointer;line-height:0}
+.status-button:hover .status-dot{box-shadow:0 0 0 3px rgba(var(--tint),.12)}

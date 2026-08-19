@@ -49,6 +49,7 @@
           <span class="speed-ping" id="speed-ping">— ms</span>
           <span class="speed-age" id="speed-age">nog niet gemeten</span>
         </button>
+        <div class="search-box"><input id="search-input" type="search" placeholder="Zoeken…" autocomplete="off" aria-label="Zoek in de inventaris"><div id="search-results" class="search-results hidden"></div></div>
         <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
         <button class="icon-button" id="theme-toggle" title="Licht of donker" aria-label="Wissel tussen licht en donker">◐</button>
         <button class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
@@ -66,7 +67,7 @@
     <section id="patch-view" class="view active">
       <div class="view-heading">
         <div><p class="eyebrow">Handmatig · bron van waarheid</p><h1>Fysieke aansluitingen</h1><p class="muted">Automatische bronnen tonen status, maar wijzigen nooit jouw poortkeuzes.</p></div>
-        <div class="heading-actions"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
+        <div class="heading-actions"><button class="button" id="print-patch">Printen</button><button class="button" id="import-csv-button">CSV importeren</button><input class="hidden" id="import-csv-file" type="file" accept=".csv,text/csv"><button class="button" id="new-entity-button">+ Device</button><button class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
       </div>
       <div id="summary-chips" class="chips"></div>
       <div class="patch-layout">
@@ -119,6 +120,8 @@
         <section class="admin-main">
           <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="add-provider">+ Databron</button><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
           <div id="providers-grid" class="providers-grid"></div>
+          <div class="section-bar with-space"><span>Recente veranderingen</span><span class="muted"><select id="changes-days" aria-label="Periode"><option value="1">24 uur</option><option value="7" selected>7 dagen</option><option value="30">30 dagen</option></select></span></div>
+          <div id="changes-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Hangt aan een netwerkapparaat (geen poort)</span><span class="muted" id="uplink-count"></span></div>

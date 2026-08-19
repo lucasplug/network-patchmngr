@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -12,7 +14,7 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, categories
 from .db import PROVIDER_TEMPLATES, Database, expires_in, utcnow
-from .providers import ProviderManager
+from .providers import ProviderManager, normalize_mac
 from .secret_store import SecretStore
 from .security import hash_password, new_token, token_digest, verify_password
 from .settings import get_settings
@@ -667,6 +669,24 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     }
 
 
+@app.get("/api/physical-devices/{device_id}/history")
+def physical_device_history(device_id: str, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    """De historie van het apparaat is die van zijn statusmonitor.
+
+    Een switch levert zelf niets aan; de observatie die erover gaat wél. Zonder
+    koppeling is er dus niets te tonen, en dat zeggen we ook.
+    """
+    device = database.fetch_one(
+        "SELECT id,name,monitor_entity_id FROM physical_devices WHERE id=?", (device_id,)
+    )
+    if not device:
+        raise HTTPException(404, "Netwerkapparaat niet gevonden")
+    if not device["monitor_entity_id"]:
+        return {"monitor_entity_id": None, "days": [], "samples": []}
+    history = entity_history(device["monitor_entity_id"])
+    return {"monitor_entity_id": device["monitor_entity_id"], **history}
+
+
 @app.get("/api/entities/{entity_id}/history")
 def entity_history(entity_id: str, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     if not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
@@ -728,6 +748,147 @@ def wizard_state(payload: WizardStateInput, auth: AuthContext = Depends(write_au
         )
     database.audit(auth.user_id, "wizard.state", "application", "wizard", payload.model_dump())
     return {"dismissed": payload.dismissed}
+
+
+CSV_COLUMNS = ("name", "type", "ip_address", "mac_address", "hostname", "notes")
+
+
+@app.post("/api/entities/import-csv")
+async def import_entities_csv(
+    file: UploadFile = File(...), auth: AuthContext = Depends(write_auth)
+) -> dict[str, Any]:
+    """Handmatige devices in bulk, voor de eerste vulling.
+
+    Bewust alleen aanmaken en bijwerken, nooit verwijderen: een half bestand
+    mag je inventaris niet leegmaken. Rijen die niet kloppen worden benoemd in
+    plaats van stil overgeslagen.
+    """
+    raw = (await file.read(1_000_000)).decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(raw))
+    if not reader.fieldnames or "name" not in [name.strip().lower() for name in reader.fieldnames]:
+        raise HTTPException(422, f"Eerste regel moet kolomnamen bevatten, met minimaal 'name'. Toegestaan: {', '.join(CSV_COLUMNS)}")
+    created = updated = 0
+    problems: list[str] = []
+    for number, row in enumerate(reader, start=2):
+        values = {
+            key.strip().lower(): (value or "").strip()
+            for key, value in row.items() if key and key.strip().lower() in CSV_COLUMNS
+        }
+        name = values.get("name", "")
+        if not name:
+            problems.append(f"regel {number}: geen naam")
+            continue
+        mac = normalize_mac(values.get("mac_address")) if values.get("mac_address") else None
+        if values.get("mac_address") and not mac:
+            problems.append(f"regel {number}: '{values['mac_address']}' is geen MAC-adres")
+            continue
+        kind = categories.normalize(values.get("type") or "device")
+        # Op MAC bijwerken, anders op naam: hetzelfde bestand twee keer
+        # inlezen mag geen dubbele apparaten opleveren.
+        existing = None
+        if mac:
+            existing = database.fetch_one("SELECT id FROM entities WHERE lower(mac_address)=?", (mac,))
+        if not existing:
+            existing = database.fetch_one(
+                "SELECT id FROM entities WHERE origin='manual' AND lower(name)=lower(?)", (name,)
+            )
+        now = utcnow()
+        with database.transaction() as connection:
+            if existing:
+                connection.execute(
+                    """UPDATE entities SET type=?,ip_address=COALESCE(?,ip_address),
+                       mac_address=COALESCE(?,mac_address),hostname=COALESCE(?,hostname),
+                       notes=CASE WHEN ?!='' THEN ? ELSE notes END,updated_at=? WHERE id=?""",
+                    (kind, values.get("ip_address") or None, mac, values.get("hostname") or None,
+                     values.get("notes", ""), values.get("notes", ""), now, existing["id"]),
+                )
+                updated += 1
+            else:
+                connection.execute(
+                    """INSERT INTO entities(id,name,type,origin,status,ip_address,mac_address,hostname,
+                                            notes,created_at,updated_at)
+                       VALUES(?,?,?,'manual','unknown',?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), name, kind, values.get("ip_address") or None, mac,
+                     values.get("hostname") or None, values.get("notes", ""), now, now),
+                )
+                created += 1
+    database.audit(auth.user_id, "entity.import_csv", "entity", None, {"created": created, "updated": updated})
+    return {"created": created, "updated": updated, "problems": problems[:20]}
+
+
+@app.get("/api/search")
+def search(q: str, _: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
+    """Eén zoekveld over alles wat een naam of adres heeft.
+
+    Bewust geen fuzzy matching of scoring: bij deze omvang is een
+    substring-treffer per kolom precies genoeg, en je kunt zien waaróm iets
+    matcht.
+    """
+    term = q.strip()
+    if len(term) < 2:
+        return []
+    like = f"%{term.lower()}%"
+    results: list[dict[str, Any]] = []
+    for row in database.fetch_all(
+        """SELECT id,name,type,origin,status,ip_address,mac_address,hostname FROM entities
+           WHERE archived=0 AND (lower(name) LIKE ? OR lower(COALESCE(ip_address,'')) LIKE ?
+                 OR lower(COALESCE(mac_address,'')) LIKE ? OR lower(COALESCE(hostname,'')) LIKE ?)
+           ORDER BY origin,name LIMIT 25""",
+        (like, like, like, like),
+    ):
+        results.append({
+            "kind": "entity", "id": row["id"], "label": row["name"],
+            "sub": row["ip_address"] or row["hostname"] or categories.label_for(row["type"]),
+            "status": row["status"], "goto": "patch",
+        })
+    for row in database.fetch_all(
+        """SELECT id,name,type,model,location FROM physical_devices
+           WHERE lower(name) LIKE ? OR lower(model) LIKE ? OR lower(location) LIKE ?
+           ORDER BY position LIMIT 25""",
+        (like, like, like),
+    ):
+        results.append({
+            "kind": "physical", "id": row["id"], "label": row["name"],
+            "sub": row["model"] or categories.label_for(row["type"]), "goto": "patch",
+        })
+    for row in database.fetch_all(
+        """SELECT id,name,url,group_name FROM app_links
+           WHERE lower(name) LIKE ? OR lower(url) LIKE ? OR lower(group_name) LIKE ?
+           ORDER BY name LIMIT 25""",
+        (like, like, like),
+    ):
+        results.append({
+            "kind": "app", "id": row["id"], "label": row["name"],
+            "sub": row["url"], "goto": "apps",
+        })
+    return results
+
+
+@app.get("/api/changes")
+def changes(days: int = 7, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+    """Wat is er sinds kort verschenen of verdwenen.
+
+    De auditlog vertelt wat jíj hebt gedaan; dit vertelt wat het netwerk deed.
+    Beide velden bestonden al, ze werden alleen nergens naast elkaar gezet.
+    """
+    days = max(1, min(days, 90))
+    since = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+    appeared = database.fetch_all(
+        """SELECT id,name,type,ip_address,mac_address,vendor,origin,first_seen_at
+           FROM entities WHERE archived=0 AND first_seen_at IS NOT NULL AND first_seen_at>=?
+           ORDER BY first_seen_at DESC LIMIT 50""",
+        (since,),
+    )
+    # 'Verdwenen' is niet hetzelfde als 'down': dit zijn dingen waar al een tijd
+    # geen enkele bron meer iets over gezegd heeft.
+    vanished = database.fetch_all(
+        """SELECT id,name,type,ip_address,mac_address,vendor,origin,last_seen_at,status
+           FROM entities WHERE archived=0 AND ignored=0 AND last_seen_at IS NOT NULL
+             AND last_seen_at<? AND status!='up'
+           ORDER BY last_seen_at DESC LIMIT 50""",
+        (since,),
+    )
+    return {"days": days, "since": since, "appeared": appeared, "vanished": vanished}
 
 
 @app.get("/api/discoveries")
