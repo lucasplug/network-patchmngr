@@ -4,7 +4,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from patch_manager import providers as providers_module
 from patch_manager.main import app, database, providers
+from patch_manager.providers import EMPTY_MAC
 
 from tests.conftest import CREDENTIALS
 
@@ -163,6 +165,52 @@ def test_provider_test_rejects_unknown_credential_field() -> None:
             json={"config": {}, "credentials": {"wachtwoord": "x"}},
         )
         assert response.status_code == 422
+
+
+ARP_AFTER_SWEEP = """IP address       HW type     Flags       HW address            Mask     Device
+192.168.100.1    0x1         0x2         58:04:4f:9c:ff:3b     *        eth0
+192.168.100.50   0x1         0x2         f4:65:0b:aa:a1:cb     *        eth0
+192.168.100.51   0x1         0x0         00:00:00:00:00:00     *        eth0
+192.168.100.52   0x1         0x0         00:00:00:00:00:00     *        eth0
+192.168.100.53   0x1         0x6         00:00:00:00:00:00     *        eth0
+192.168.100.54   0x1         0xnope      aa:bb:cc:dd:ee:ff     *        eth0
+kapotte regel
+"""
+
+
+def test_arp_table_skips_neighbours_the_sweep_never_resolved() -> None:
+    """Een ping-sweep laat lege buren achter; die zijn geen apparaten."""
+    neighbours = providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+    assert sorted(neighbours) == ["192.168.100.1", "192.168.100.50"]
+    assert neighbours["192.168.100.1"]["mac"] == "58:04:4f:9c:ff:3b"
+
+
+def test_arp_table_ignores_empty_mac_even_when_flagged_complete() -> None:
+    """De nul-MAC wordt los van de vlaggen geweerd, niet alleen via 0x0."""
+    assert "192.168.100.53" not in providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+
+
+def test_arp_table_survives_a_malformed_flags_column() -> None:
+    assert "192.168.100.54" not in providers_module.parse_arp_table(ARP_AFTER_SWEEP)
+
+
+def test_arp_table_normalises_case() -> None:
+    table = "kop\n10.0.0.9  0x1  0x2  AA:BB:CC:DD:EE:FF  *  eth0\n"
+    assert providers_module.parse_arp_table(table)["10.0.0.9"]["mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_zero_mac_is_not_an_address() -> None:
+    """Anders koppelt _store_record alles met die MAC aan één entity."""
+    assert providers_module.normalize_mac("00:00:00:00:00:00") is None
+    assert providers_module.normalize_mac("00-00-00-00-00-00") is None
+    assert providers_module.normalize_mac("58:04:4f:9c:ff:3b") == "58:04:4f:9c:ff:3b"
+
+
+def test_two_devices_without_a_mac_stay_separate() -> None:
+    """Twee ping-vondsten zonder MAC mogen niet in elkaar schuiven."""
+    first = make_discovery("192.168.1.71", "een", ip_address="192.168.1.71", mac_address=EMPTY_MAC)
+    second = make_discovery("192.168.1.72", "twee", ip_address="192.168.1.72", mac_address=EMPTY_MAC)
+    assert first != second
 
 
 def test_dhcp_arp_test_refuses_untrusted_subnet() -> None:

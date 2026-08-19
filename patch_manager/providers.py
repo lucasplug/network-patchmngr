@@ -22,12 +22,51 @@ logger = logging.getLogger(__name__)
 
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
+# Vlag ATF_COM in /proc/net/arp: het adres is echt opgelost. Staat hij niet aan,
+# dan is het een lege buur met MAC 00:00:00:00:00:00.
+ARP_FLAG_COMPLETE = 0x2
+EMPTY_MAC = "00:00:00:00:00:00"
+
 
 def normalize_mac(value: str | None) -> str | None:
+    """Een MAC-adres in kleine letters, of None als het er geen is.
+
+    De nul-MAC telt niet: hij is syntactisch geldig maar hoort bij geen enkel
+    apparaat. Zou hij wel blijven staan, dan koppelt _store_record elk
+    apparaat met die MAC aan dezelfde entity.
+    """
     if not value:
         return None
     match = MAC_RE.search(value.replace("-", ":"))
-    return match.group(0).lower() if match else None
+    if not match:
+        return None
+    mac = match.group(0).lower()
+    return None if mac == EMPTY_MAC else mac
+
+
+def parse_arp_table(text: str) -> dict[str, dict[str, str]]:
+    """De opgeloste buren uit /proc/net/arp, op IP.
+
+    Een ping-sweep laat voor élk adres waar niets op zit een onvolledige buur
+    achter: vlaggen 0x0 en MAC 00:00:00:00:00:00. Zonder deze twee controles
+    levert een scan over een /22 honderden 'apparaten' op die niet bestaan.
+    """
+    neighbours: dict[str, dict[str, str]] = {}
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        mac = normalize_mac(parts[3])
+        if not mac:
+            continue
+        try:
+            flags = int(parts[2], 16)
+        except ValueError:
+            continue
+        if not flags & ARP_FLAG_COMPLETE:
+            continue
+        neighbours[parts[0]] = {"ip": parts[0], "mac": mac}
+    return neighbours
 
 
 def is_ip_literal(value: Any) -> bool:
@@ -230,10 +269,7 @@ class ProviderManager:
 
         def read_arp_table() -> None:
             if arp_path.exists():
-                for line in arp_path.read_text().splitlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4 and normalize_mac(parts[3]):
-                        found[parts[0]] = {"ip": parts[0], "mac": parts[3]}
+                found.update(parse_arp_table(arp_path.read_text()))
 
         read_arp_table()
 
@@ -582,12 +618,7 @@ class ProviderManager:
 
     async def _test_dhcp_arp(self, config: dict[str, Any], credentials: dict[str, str]) -> str:
         arp_path = Path("/proc/net/arp")
-        entries = 0
-        if arp_path.exists():
-            for line in arp_path.read_text().splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 4 and normalize_mac(parts[3]):
-                    entries += 1
+        entries = len(parse_arp_table(arp_path.read_text())) if arp_path.exists() else 0
         subnets = [str(value) for value in config.get("subnets", [])]
         for value in subnets:
             network = ipaddress.ip_network(value, strict=False)
