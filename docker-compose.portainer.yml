@@ -43,6 +43,9 @@ services:
     environment:
       TZ: Europe/Amsterdam
       PATCH_SESSION_SECURE: "false"
+      # Is 8080 op de VM al bezet, zet hier bijvoorbeeld "8099".
+      # Host networking negeert ports:, dus dit is de enige knop.
+      PATCH_PORT: "8080"
       PATCH_TRUSTED_SUBNETS: 192.168.1.0/24,127.0.0.0/8
       PATCH_BACKUP_SCHEDULE_HOUR: "3"
       PATCH_BACKUP_RETENTION_DAILY: "14"
