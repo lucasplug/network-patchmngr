@@ -417,7 +417,9 @@ function renderAdmin() {
       <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "gereed") : "uit"}</span></div>
       <div class="provider-details"><div><span>Laatste succes</span><b>${formatTime(provider.last_success_at)}</b></div><div><span>Interval</span><b>${provider.poll_interval_seconds}s</b></div></div>
       ${provider.last_error ? `<p class="form-error tiny" title="${esc(provider.last_error)}">${esc(shorten(provider.last_error, 62))}</p>` : ""}
-      <div class="provider-actions"><button class="button" data-provider-edit="${provider.id}">Configureren</button><button class="button" data-provider-sync="${provider.id}">Nu ophalen</button></div>
+      <div class="provider-actions"><button class="button" data-provider-edit="${provider.id}">Configureren</button><button class="button" data-provider-sync="${provider.id}">Nu ophalen</button>${
+        state.data.providers.filter(item => item.type === provider.type).length > 1
+          ? `<button class="button danger" data-provider-delete="${provider.id}">Verwijder</button>` : ""}</div>
     </article>`;
   }).join("");
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
@@ -540,6 +542,7 @@ function openProvider(providerId) {
   const form = $("#provider-form");
   form.reset();
   form.elements.provider_id.value = provider.id;
+  form.elements.name.value = provider.name;
   form.elements.enabled.checked = provider.enabled;
   form.elements.poll_interval_seconds.value = provider.poll_interval_seconds;
   form.elements.config.value = JSON.stringify(provider.config, null, 2);
@@ -582,6 +585,44 @@ function readEndpointRows() {
     entity_id: $('[data-endpoint="entity_id"]', row).value || null,
   }));
 }
+
+// Thema: de keuze staat in localStorage, niet in de database. Het is een
+// voorkeur van deze browser, niet van de installatie.
+function applyTheme(light) {
+  document.documentElement.toggleAttribute("data-theme", false);
+  if (light) document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  try { localStorage.setItem("patch-theme", light ? "light" : "dark"); } catch { /* private mode */ }
+  $("#theme-toggle").textContent = light ? "◑" : "◐";
+}
+
+$("#theme-toggle").addEventListener("click", () => {
+  applyTheme(document.documentElement.getAttribute("data-theme") !== "light");
+});
+$("#theme-toggle").textContent = document.documentElement.getAttribute("data-theme") === "light" ? "◑" : "◐";
+
+$("#add-provider").addEventListener("click", () => {
+  // Alleen soorten die je al hebt: een type dat de app niet kent heeft geen
+  // adapter, en dus geen nut.
+  const kinds = new Map(state.data.providers.map(item => [item.type, item]));
+  $("#provider-add-type").innerHTML = [...kinds.values()]
+    .map(item => `<option value="${esc(item.type)}">${esc(item.name)} (${esc(item.type)})</option>`).join("");
+  $("#provider-add-form").reset();
+  $("#provider-add-dialog").showModal();
+});
+
+$("#provider-add-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = {type: form.elements.type.value, name: form.elements.name.value};
+  try {
+    const created = await api("/api/providers", {method:"POST", body:JSON.stringify(payload)});
+    $("#provider-add-dialog").close();
+    await loadData(true);
+    toast("Databron toegevoegd");
+    openProvider(created.id);
+  } catch (error) { toast(error.message, "error"); }
+});
 
 $("#endpoint-add").addEventListener("click", () => {
   renderEndpointRows([...readEndpointRows(), {name: "", url: "", entity_id: null}]);
@@ -722,6 +763,14 @@ document.addEventListener("click", async event => {
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
   const mapping=event.target.closest("[data-mapping-edit]");if(mapping)openMapping(mapping.dataset.mappingEdit);
+  const providerDelete=event.target.closest("[data-provider-delete]");
+  if(providerDelete){
+    const provider=state.data.providers.find(item=>item.id===providerDelete.dataset.providerDelete);
+    if(provider&&prompt(`Typ de naam om te bevestigen:\n\n${provider.name}`)===provider.name){
+      try{await api(`/api/providers/${encodeURIComponent(provider.id)}?confirm=${encodeURIComponent(provider.name)}`,{method:"DELETE"});await loadData(true);toast("Databron verwijderd");}
+      catch(error){toast(error.message,"error");}
+    }
+  }
   const uplinkClear=event.target.closest("[data-uplink-clear]");
   if(uplinkClear){const id=uplinkClear.dataset.uplinkClear;try{await api(`/api/entities/${encodeURIComponent(id)}/uplink`,{method:"PUT",body:JSON.stringify({physical_device_id:null})});await loadData(true);toast("Losgekoppeld");}catch(error){toast(error.message,"error");}}
   const discovery=event.target.closest("[data-discovery-state]");
@@ -806,7 +855,7 @@ $("#provider-form").addEventListener("submit", async event => {
     const credentials = {};
     $$('[data-credential-key]', form).forEach(input => { if (input.value.trim()) credentials[input.dataset.credentialKey] = input.value; });
     const clear_credentials = $$('[data-clear-credential]:checked', form).map(input => input.dataset.clearCredential);
-    await api(`/api/providers/${form.elements.provider_id.value}`, {method:"PATCH", body:JSON.stringify({enabled:form.elements.enabled.checked,poll_interval_seconds:Number(form.elements.poll_interval_seconds.value),config,credentials,clear_credentials})});
+    await api(`/api/providers/${form.elements.provider_id.value}`, {method:"PATCH", body:JSON.stringify({name:form.elements.name.value,enabled:form.elements.enabled.checked,poll_interval_seconds:Number(form.elements.poll_interval_seconds.value),config,credentials,clear_credentials})});
     $("#provider-dialog").close(); await loadData(true); toast("Providerconfiguratie opgeslagen");
   } catch(error){toast(error instanceof SyntaxError ? "Configuratie bevat ongeldige JSON" : error.message,"error");}
 });
@@ -865,7 +914,10 @@ initialize();
 /* ---------------------------------------------------------------- wizard */
 // Geen server-side wizardstatus: elke stap doet gewone mutaties, dus
 // afbreken laat nooit een halve toestand achter.
-const wizard = {step: 1, providers: ["dhcp-arp", "proxmox", "portainer", "glances", "adguard", "nginx-proxy-manager", "uptime-kuma"], created: 0, merged: 0, ignored: 0};
+// Welke bronnen de wizard toont volgt de inventaris, niet een vaste lijst:
+// anders mist een tweede Portainer die je zelf hebt toegevoegd.
+const wizard = {step: 1, created: 0, merged: 0, ignored: 0};
+const wizardProviderIds = () => state.data.providers.filter(item => item.type !== "dhcp_arp").map(item => item.id);
 
 function wizardShow(step) {
   wizard.step = Math.min(4, Math.max(1, step));
@@ -937,7 +989,7 @@ async function renderScanResults() {
 }
 
 function renderWizardProviders() {
-  $("#wizard-providers").innerHTML = wizard.providers.filter(id => id !== "dhcp-arp").map(id => {
+  $("#wizard-providers").innerHTML = wizardProviderIds().map(id => {
     const provider = state.data.providers.find(item => item.id === id);
     if (!provider) return "";
     const fields = provider.credential_fields || [];

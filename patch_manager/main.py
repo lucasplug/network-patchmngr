@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, categories
-from .db import Database, expires_in, utcnow
+from .db import PROVIDER_TEMPLATES, Database, expires_in, utcnow
 from .providers import ProviderManager
 from .secret_store import SecretStore
 from .security import hash_password, new_token, token_digest, verify_password
@@ -126,11 +126,20 @@ class PortInput(BaseModel):
 
 
 class ProviderInput(BaseModel):
+    # Met twee Portainers moet je ze uit elkaar kunnen houden.
+    name: str | None = Field(default=None, max_length=100)
     enabled: bool
     poll_interval_seconds: int = Field(ge=15, le=86400)
     config: dict[str, Any]
     credentials: dict[str, str | None] = Field(default_factory=dict)
     clear_credentials: list[str] = Field(default_factory=list)
+
+
+class ProviderCreateInput(BaseModel):
+    """Een tweede omgeving van een soort die je al hebt."""
+
+    type: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=100)
 
 
 class AppSettingsInput(BaseModel):
@@ -1154,6 +1163,50 @@ def port_cable_clear(port_id: str, auth: AuthContext = Depends(write_auth)) -> d
     return {"ok": True}
 
 
+@app.post("/api/providers")
+def create_provider(payload: ProviderCreateInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Nog een omgeving van een bestaand soort: een tweede Portainer of AdGuard."""
+    template = next((item for item in PROVIDER_TEMPLATES if item[1] == payload.type), None)
+    if not template:
+        raise HTTPException(422, "Onbekend providertype")
+    provider_id = str(uuid.uuid4())
+    # Het sjabloon bevat voorbeeldadressen; bij een tweede omgeving zouden die
+    # alleen maar suggereren dat er al iets is ingevuld.
+    config = dict(template[4])
+    if "base_url" in config:
+        config["base_url"] = ""
+    if "endpoints" in config:
+        config["endpoints"] = []
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO providers(id,type,name,enabled,poll_interval_seconds,config_json,updated_at)
+               VALUES(?,?,?,0,?,?,?)""",
+            (provider_id, payload.type, payload.name.strip(), template[3], json.dumps(config), utcnow()),
+        )
+    database.audit(auth.user_id, "provider.create", "provider", provider_id, {"type": payload.type})
+    return serialize_provider(database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,)))
+
+
+@app.delete("/api/providers/{provider_id}")
+def delete_provider(provider_id: str, confirm: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    provider = database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
+    if not provider:
+        raise HTTPException(404, "Provider niet gevonden")
+    if confirm != provider["name"]:
+        raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
+    # De laatste van een soort weghalen laat de app zonder die adapter achter;
+    # uitzetten doet hetzelfde zonder de instellingen te verliezen.
+    remaining = database.fetch_one(
+        "SELECT COUNT(*) AS n FROM providers WHERE type=?", (provider["type"],)
+    )["n"]
+    if remaining <= 1:
+        raise HTTPException(409, "Dit is de enige bron van dit type; zet hem uit in plaats van te verwijderen")
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM providers WHERE id=?", (provider_id,))
+    database.audit(auth.user_id, "provider.delete", "provider", provider_id, {"name": provider["name"]})
+    return {"ok": True}
+
+
 @app.patch("/api/providers/{provider_id}")
 def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     provider = database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
@@ -1165,8 +1218,9 @@ def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext 
         raise HTTPException(422, "Onbekend credentialveld voor deze provider")
     with database.transaction() as connection:
         connection.execute(
-            """UPDATE providers SET enabled=?,poll_interval_seconds=?,config_json=?,updated_at=? WHERE id=?""",
-            (int(payload.enabled), payload.poll_interval_seconds, json.dumps(payload.config), utcnow(), provider_id),
+            """UPDATE providers SET name=?,enabled=?,poll_interval_seconds=?,config_json=?,updated_at=? WHERE id=?""",
+            ((payload.name or provider["name"]).strip() or provider["name"], int(payload.enabled),
+             payload.poll_interval_seconds, json.dumps(payload.config), utcnow(), provider_id),
         )
     provider_secrets.update(provider_id, payload.credentials, payload.clear_credentials)
     database.audit(auth.user_id, "provider.update", "provider", provider_id, {"enabled": payload.enabled})

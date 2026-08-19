@@ -14,6 +14,8 @@ issue-tracker — één regel per punt volstaat.
 | 6 | Kan ik een Glances- of Uptime Kuma-entity aan switch 1 of 2 hangen? | Deels. De poortloze uplink accepteerde ook containers, VM's en monitors — die hebben geen netwerkpoort. En een overgenomen (handmatig) device kon helemaal geen uplink meer krijgen, want het toewijsscherm toont alleen discoveries | `attachable` per categorie, afgedwongen in `PUT /uplink`; uplinkveld in het devicedialoog |
 | 7 | Een SG108E kan wél in Uptime Kuma gemonitord worden of hij online is | `physical_devices` had helemaal geen status. Switches en Deco's stonden altijd kleurloos in beeld, terwijl de ping-observatie ernaast als losse entity rondzweefde | `physical_devices.monitor_entity_id`: het apparaat leent de status van de observatie die erover gaat |
 | 8 | De glasvezel-ONT ontbreekt; die verzorgt het internet en gaat bedraad naar een Deco | Er was geen ONT-categorie, en erger: een kabel tússen twee netwerkapparaten werd niet in de topologie getekend. `trace_entity()` gaf `None` zodra een kabel op een poort eindigde in plaats van op een device | Categorie `ont` + geseed apparaat; `trace_far_port()` tekent apparaat-naar-apparaat als `trunk:`-relatie |
+| 9 | Er is een tweede Portainer en een tweede AdGuard | `providers.type` was `UNIQUE`: exact één bron per soort | Die beperking eruit, plus toevoegen/hernoemen/verwijderen van bronnen. De wizard leest nu de inventaris in plaats van een vaste lijst |
+| 10 | Graag een licht thema | De CSS had een tokenblok, maar 121 harde kleuren daarbuiten — waaronder donkere vlakken en lichte tekstkleuren | Alle overlays via `--tint`, vlakken en merkkleuren naar tokens; licht thema is nu één `[data-theme="light"]`-blok |
 
 ## Bijvangst bij deze punten
 
@@ -42,6 +44,13 @@ issue-tracker — één regel per punt volstaat.
   die de status van een apparaat levert krijgt geen eigen knoop meer; de
   uplinkrelatie ernaartoe bleef wel staan en botste op een foreign key.
   Gevonden door twee browsercontroles achter elkaar op dezelfde database.
+- **Het thema volgt standaard je systeem.** De keuze staat in `localStorage`,
+  niet in de database: het is een voorkeur van deze browser, niet van de
+  installatie. Een klein inline script zet hem vóór de eerste render, anders
+  flitst bij elke reload eerst het donkere thema voorbij.
+- **De laatste bron van een soort is niet te verwijderen.** Dan blijft de app
+  zonder die adapter achter; uitzetten doet hetzelfde zonder de instellingen
+  kwijt te raken.
 - **Glances koppelt nu op endpoint in plaats van op hostnaam.** De sleutel van
   een providerrecord is `host:<entity_id>` geworden: verandert de hostnaam van
   een machine, dan blijft het dezelfde rij. Een afwijkende naam levert bij een
@@ -49,6 +58,6 @@ issue-tracker — één regel per punt volstaat.
 
 ## Schema gewijzigd
 
-Punt 3, 4, 7 en 8 wijzigen `db.py` (`entities.uplink_device_id`,
+Punt 3, 4, 7, 8 en 9 wijzigen `db.py` (`entities.uplink_device_id`,
 `physical_devices.monitor_entity_id`, `entity_id` per Glances-endpoint). Er is geen migratiepad: gooi het datavolume weg en begin
 opnieuw.

@@ -15,6 +15,8 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **Topologie** — geneste hosts/VM's/containers/services, fysieke en virtuele relaties, status en live metrics. Pan met slepen, zoom met het scrollwiel of de knoppen; elke node toont één kerngetal (cpu of respons). In bewerkmodus kun je nodes verslepen, groeperen, hernoemen, plannen en handmatige relaties tekenen.
 - **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
 - **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
+- **Meerdere omgevingen per bron** — twee Portainers, twee AdGuards: elke bron is een eigen instantie met eigen adres, inloggegevens en naam. Toevoegen via **Admin → + Databron**. De laatste van een soort kun je uitzetten maar niet verwijderen.
+- **Licht en donker thema** — de knop rechtsboven wisselt; standaard volgt de app je systeeminstelling. De keuze is per browser, niet per installatie.
 - **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.
 - **Discoverybeheer** — discoveries negeren, archiveren, herstellen of samenvoegen met een bestaand device; providerrecords kunnen ook expliciet worden gekoppeld en ontkoppeld.
 - **Uitwisseling & herstel** — SQLite-back-ups downloaden, importeren en terugzetten, plus configuratie exporteren/importeren als JSON. Voor restore/import wordt automatisch een veiligheidsback-up gemaakt.

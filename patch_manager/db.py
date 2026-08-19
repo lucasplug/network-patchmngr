@@ -156,7 +156,9 @@ CREATE TABLE IF NOT EXISTS entity_days (
 
 CREATE TABLE IF NOT EXISTS providers (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL UNIQUE,
+  -- Bewust niet uniek: je kunt twee Portainers of twee AdGuards hebben. De
+  -- adapters kiezen op type, de instellingen en geheimen hangen aan het id.
+  type TEXT NOT NULL,
   name TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 0,
   poll_interval_seconds INTEGER NOT NULL DEFAULT 300,

@@ -3,11 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>Network Patch Manager</title>
   <!-- Inline favicon: scheelt een request en een 404 in het serverlog. -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e141c'/%3E%3Crect x='3' y='5' width='2.5' height='6' rx='1' fill='%233ddc97'/%3E%3Crect x='6.75' y='5' width='2.5' height='6' rx='1' fill='%238f7df8'/%3E%3Crect x='10.5' y='5' width='2.5' height='6' rx='1' fill='%23667282'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/styles.css">
+  <script>
+    // Inline en vóór de stylesheet-render: anders flitst bij elke reload eerst
+    // het donkere thema voorbij.
+    try {
+      var saved = localStorage.getItem("patch-theme");
+      var light = saved ? saved === "light" : window.matchMedia("(prefers-color-scheme: light)").matches;
+      if (light) document.documentElement.setAttribute("data-theme", "light");
+    } catch (e) { /* private mode: dan gewoon donker */ }
+  </script>
 </head>
 <body>
   <div class="ambient"></div>
@@ -41,6 +50,7 @@
           <span class="speed-age" id="speed-age">nog niet gemeten</span>
         </button>
         <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
+        <button class="icon-button" id="theme-toggle" title="Licht of donker" aria-label="Wissel tussen licht en donker">◐</button>
         <button class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
         <button class="profile-button" id="logout-button"><span class="avatar" id="avatar">A</span><span id="username">admin</span></button>
       </div>
@@ -98,7 +108,7 @@
       <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".pmbackup,.db,application/zip,application/vnd.sqlite3"></div></div>
       <div class="admin-grid">
         <section class="admin-main">
-          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
+          <div class="section-bar"><span>Databronnen</span><div class="row-actions"><button class="button micro" id="add-provider">+ Databron</button><button class="button micro" id="open-assign">Nieuwe apparaten toewijzen</button><button class="button micro" id="open-wizard">Setup-wizard</button></div></div>
           <div id="providers-grid" class="providers-grid"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
@@ -169,6 +179,7 @@
     <form id="provider-form" class="stack">
       <div class="modal-head"><div><p class="eyebrow">Providerconfiguratie</p><h2 id="provider-dialog-title">Provider</h2></div><button type="button" class="icon-button modal-close">×</button></div>
       <input type="hidden" name="provider_id">
+      <label>Naam<input name="name" required maxlength="100" placeholder="bijv. Portainer zolder"></label>
       <div class="field-row"><label class="toggle-label"><input name="enabled" type="checkbox"><span>Provider ingeschakeld</span></label><label>Pollinterval (seconden)<input name="poll_interval_seconds" type="number" min="15" max="86400"></label></div>
       <div id="provider-endpoints" class="stack hidden">
         <div class="section-bar"><span>Glances-endpoints</span><button type="button" class="button micro" id="endpoint-add">+ Endpoint</button></div>
@@ -179,6 +190,16 @@
       <div id="provider-credentials" class="stack"></div>
       <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="provider-add-dialog" class="modal glass">
+    <form id="provider-add-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Databron</p><h2>Nog een omgeving toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <p class="muted tiny">Voor als je twee Portainers of twee AdGuards draait. Adres en inloggegevens vul je daarna in bij Configureren.</p>
+      <label>Soort<select name="type" id="provider-add-type"></select></label>
+      <label>Naam<input name="name" required maxlength="100" placeholder="bijv. AdGuard zolder"></label>
+      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
     </form>
   </dialog>
 
