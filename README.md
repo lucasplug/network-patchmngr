@@ -32,6 +32,21 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager, elk met een testverbinding die vóór opslaan laat zien wat hij zou vinden.
 - Vendorherkenning van gevonden apparaten via een lokaal IEEE OUI-bestand in de image — geen enkele externe lookup.
 
+## Versies en terugrollen
+
+Het versienummer staat op één plek, `patch_manager/__init__.py`, en komt terug
+in `/health` en de OpenAPI-documentatie. Een release-tag `vX.Y.Z` moet daarmee
+overeenkomen; de workflow weigert de build als dat niet zo is.
+
+Een push naar `main` publiceert `:latest` en de korte commit-sha. Een
+release-tag publiceert `:X.Y.Z` en laat `:latest` met rust, zodat het taggen van
+een ouder commit die niet achteruit zet.
+
+Terugrollen doe je door in de stack `image:` op een versietag te zetten. Let op:
+de database wordt bij het bijwerken gemigreerd en een oudere app **weigert** een
+nieuwere database te openen — die meldt dat en start niet, in plaats van je
+gegevens te beschadigen. Zet in dat geval eerst een back-up terug.
+
 ## Starten via Portainer (aanbevolen)
 
 De image wordt bij elke push naar `main` automatisch gepubliceerd naar
