@@ -48,7 +48,7 @@ Start daarna de applicatie. De beveiligingssleutel wordt bij de eerste start aut
 docker compose up -d --build
 ```
 
-Open `http://<docker-vm-ip>:8080`. De eerste bezoeker maakt het eenmalige beheeraccount aan. Daarna verdwijnt de setup-route automatisch. De container gebruikt host networking op de Linux Docker-VM, zodat DHCP/ARP-discovery de LAN-burentabel kan gebruiken; poort 8080 moet daarom vrij zijn op die VM.
+Open `http://<docker-vm-ip>:8080`. Is die poort op de VM al bezet, zet dan `PATCH_PORT` op een vrije poort — de app én de healthcheck volgen die variabele. Host networking negeert `ports:`, dus dit is de enige manier om de poort te wijzigen. De eerste bezoeker maakt het eenmalige beheeraccount aan. Daarna verdwijnt de setup-route automatisch. De container gebruikt host networking op de Linux Docker-VM, zodat DHCP/ARP-discovery de LAN-burentabel kan gebruiken; de gekozen poort moet daarom vrij zijn op die VM.
 
 De zichtbare applicatietitel wijzig je onder **Admin → Applicatie**. Zo kan dezelfde openbare code onder een eigen naam worden gebruikt. Providergeheimen staan niet in de repository of configuratie-export. Admin-back-ups zijn draagbare `.pmbackup`-pakketten met de database en bijbehorende encryptiesleutel. Behandel zo'n bestand daarom als een wachtwoord en bewaar het versleuteld.
 

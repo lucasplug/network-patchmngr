@@ -21,7 +21,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATCH_DATA_DIR=/data \
     PATCH_BACKUP_DIR=/backups \
-    PATCH_OUI_FILE=/app/oui.csv
+    PATCH_OUI_FILE=/app/oui.csv \
+    PATCH_PORT=8080
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping libcap2-bin \
@@ -44,8 +45,11 @@ COPY static ./static
 
 USER 10001:10001
 
+# De poort staat in PATCH_PORT zodat hij op één plek te wijzigen is; de
+# healthcheck leest dezelfde variabele, anders raakt die uit de pas bij een
+# afwijkende poort. EXPOSE is documentatie en blijft op de standaardwaarde.
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"
+  CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PATCH_PORT', '8080'), timeout=2)"]
 
-CMD ["uvicorn", "patch_manager.main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]
+CMD ["sh", "-c", "exec uvicorn patch_manager.main:app --host 0.0.0.0 --port \"${PATCH_PORT:-8080}\" --proxy-headers"]
