@@ -159,6 +159,7 @@
       <label>Naam<input name="name" required placeholder="bijv. Patchpanel zolder"></label>
       <div class="field-row"><label>Categorie<select name="type" id="physical-type-select"></select></label><label>Aantal poorten<input name="ports" type="number" min="1" max="96" value="8"></label></div>
       <div class="field-row"><label>Model<input name="model"></label><label>Locatie<input name="location"></label></div>
+      <label>Statusmonitor<select name="monitor_entity_id" id="physical-monitor-select"></select><small class="muted">Bijvoorbeeld een Uptime Kuma-ping op het beheer-IP. Zonder koppeling blijft de status onbekend.</small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Toevoegen</button></div>
     </form>

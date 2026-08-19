@@ -12,6 +12,7 @@ issue-tracker — één regel per punt volstaat.
 | 4 | Gevonden apparaten zijn niet aan een Deco te koppelen | Koppelen was uitsluitend "kabel van poort naar device". Een Deco heeft drie poorten en tientallen wifi-clients, dus daar paste niets | `entities.uplink_device_id`: hangt aan een netwerkapparaat zónder poort. Kabel wint als die er is |
 | 5 | De rol van een apparaat is niet af te lezen | `type` was een vrij tekstveld met twee losse keuzelijsten die geen van beide dekten wat providers opleveren | Eén lijst in `patch_manager/categories.py`, gebruikt voor keuzelijsten, iconen en labels |
 | 6 | Kan ik een Glances- of Uptime Kuma-entity aan switch 1 of 2 hangen? | Deels. De poortloze uplink accepteerde ook containers, VM's en monitors — die hebben geen netwerkpoort. En een overgenomen (handmatig) device kon helemaal geen uplink meer krijgen, want het toewijsscherm toont alleen discoveries | `attachable` per categorie, afgedwongen in `PUT /uplink`; uplinkveld in het devicedialoog |
+| 7 | Een SG108E kan wél in Uptime Kuma gemonitord worden of hij online is | `physical_devices` had helemaal geen status. Switches en Deco's stonden altijd kleurloos in beeld, terwijl de ping-observatie ernaast als losse entity rondzweefde | `physical_devices.monitor_entity_id`: het apparaat leent de status van de observatie die erover gaat |
 
 ## Bijvangst bij deze punten
 
@@ -37,6 +38,6 @@ issue-tracker — één regel per punt volstaat.
 
 ## Schema gewijzigd
 
-Punt 3 en 4 wijzigen `db.py` (`entities.uplink_device_id`, `entity_id` per
-Glances-endpoint). Er is geen migratiepad: gooi het datavolume weg en begin
+Punt 3, 4 en 7 wijzigen `db.py` (`entities.uplink_device_id`,
+`physical_devices.monitor_entity_id`, `entity_id` per Glances-endpoint). Er is geen migratiepad: gooi het datavolume weg en begin
 opnieuw.

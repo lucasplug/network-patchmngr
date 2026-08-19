@@ -177,7 +177,7 @@ function deviceFace(device) {
   return `
     <article class="device-card" data-device-card="${esc(device.id)}">
       <header class="device-head">
-        <div><div class="device-title">${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet</div></div>
+        <div><div class="device-title">${statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
         <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
       </header>
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
@@ -201,10 +201,14 @@ function renderPatch() {
 function renderUnpatched() {
   const linked = new Set(state.data.physical_devices.flatMap(device =>
     device.ports.filter(port => port.link_kind === "entity").map(port => port.entity_id)));
+  // Al geplaatst: hangt poortloos aan een netwerkapparaat, of levert er de
+  // status van. Beide horen niet meer in "nog te koppelen".
+  const placed = new Set(state.data.physical_devices.map(device => device.monitor_entity_id).filter(Boolean));
   // Alleen dingen met een eigen netwerkpoort; een container of monitor hangt
   // aan zijn host, niet aan een switch. De regel staat in categories.py.
   const free = state.data.entities.filter(entity =>
-    !linked.has(entity.id) && !entity.archived && canAttach(entity.type));
+    !linked.has(entity.id) && !entity.archived && canAttach(entity.type)
+    && !entity.uplink_device_id && !placed.has(entity.id));
   $("#unpatched-count").textContent = `${free.length} vrij`;
   $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
     <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
@@ -402,7 +406,8 @@ function renderAdmin() {
   const assigned = new Set(state.data.physical_devices.flatMap(device => device.ports.filter(port => port.entity_id).map(port => port.entity_id)));
   // Een poortloze uplink telt ook als geplaatst; anders blijft een wifi-client
   // eeuwig in de "nog te koppelen"-lijst staan.
-  const unlinked = state.data.entities.filter(entity => entity.origin === "discovered" && !entity.ignored && !entity.archived && !assigned.has(entity.id) && !entity.uplink_device_id);
+  const monitoring = new Set(state.data.physical_devices.map(device => device.monitor_entity_id).filter(Boolean));
+  const unlinked = state.data.entities.filter(entity => entity.origin === "discovered" && !entity.ignored && !entity.archived && !assigned.has(entity.id) && !entity.uplink_device_id && !monitoring.has(entity.id));
   const uplinked = state.data.entities.filter(entity => entity.uplink_device_id && !entity.ignored && !entity.archived);
   const deviceName = id => state.data.physical_devices.find(device => device.id === id)?.name || "onbekend apparaat";
   const inactive = state.data.entities.filter(entity => entity.origin === "discovered" && (entity.ignored || entity.archived));
@@ -611,6 +616,10 @@ function openPhysical(deviceId=""){
   const form=$("#physical-form"),device=deviceId?state.data.physical_devices.find(item=>item.id===deviceId):null;form.reset();form.elements.device_id.value=deviceId;
   $("#physical-dialog-title").textContent=device?"Netwerkapparaat bewerken":"Netwerkapparaat toevoegen";
   $("#physical-type-select").innerHTML=categoryOptions(device?.type||"switch",{physical:true});
+  // Een switch draait geen agent, maar is wel te pingen. Koppel de observatie
+  // die daarover gaat en het apparaat krijgt diens status.
+  $("#physical-monitor-select").innerHTML=`<option value="">— geen statusmonitor —</option>${state.data.entities.filter(entity=>!entity.archived).map(entity=>
+    `<option value="${esc(entity.id)}"${entity.id===device?.monitor_entity_id?" selected":""}>${esc(entity.name)} · ${esc(categoryLabel(entity.type))}</option>`).join("")}`;
   if(device){["name","type","model","location","notes"].forEach(key=>form.elements[key].value=device[key]||"");form.elements.ports.value=device.ports.length;}
   $("#physical-dialog").showModal();
 }

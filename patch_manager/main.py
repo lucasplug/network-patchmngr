@@ -96,6 +96,9 @@ class PhysicalDeviceInput(BaseModel):
     location: str = Field(default="", max_length=100)
     notes: str = Field(default="", max_length=2000)
     ports: int = Field(default=1, ge=1, le=96)
+    # De observatie die vertelt of dit apparaat aan staat; een switch draait
+    # geen agent maar is wel te pingen of te monitoren.
+    monitor_entity_id: str | None = Field(default=None, max_length=64)
 
 
 class CableInput(BaseModel):
@@ -532,8 +535,18 @@ def nested_physical_devices() -> list[dict[str, Any]]:
         port["ip_address"] = entity["ip_address"] if entity else None
         port["hostname"] = entity["hostname"] if entity else None
         by_device.setdefault(port["physical_device_id"], []).append(port)
+    monitors = {
+        row["id"]: row
+        for row in database.fetch_all("SELECT id,name,status,status_updated_at FROM entities")
+    }
     for device in devices:
         device["ports"] = by_device.get(device["id"], [])
+        # Een netwerkapparaat heeft geen eigen status; die leent het van de
+        # observatie die erover gaat. Zonder koppeling blijft dat 'unknown'.
+        monitor = monitors.get(device["monitor_entity_id"])
+        device["status"] = monitor["status"] if monitor else "unknown"
+        device["status_updated_at"] = monitor["status_updated_at"] if monitor else None
+        device["monitor_name"] = monitor["name"] if monitor else None
     return devices
 
 
@@ -543,16 +556,20 @@ def inventory_counts() -> dict[str, Any]:
         for row in database.fetch_all("SELECT b_entity_id FROM cables WHERE b_entity_id IS NOT NULL")
     }
     open_discoveries = database.fetch_all(
-        "SELECT id,uplink_device_id FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"
+        """SELECT id,uplink_device_id,
+                  (SELECT COUNT(*) FROM physical_devices d WHERE d.monitor_entity_id=entities.id) AS monitors
+           FROM entities WHERE origin='discovered' AND ignored=0 AND archived=0"""
     )
     return {
         "ports": database.fetch_one("SELECT COUNT(*) AS n FROM ports WHERE side='front'")["n"],
         "patched": database.fetch_one("SELECT COUNT(*) AS n FROM cables")["n"],
         "up": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='up'")["n"],
         "down": database.fetch_one("SELECT COUNT(*) AS n FROM entities WHERE status='down'")["n"],
+        # Een monitor die de status van een netwerkapparaat levert heeft ook
+        # een plek gekregen, al hangt hij nergens aan een poort.
         "unlinked": sum(
             1 for row in open_discoveries
-            if row["id"] not in linked and not row["uplink_device_id"]
+            if row["id"] not in linked and not row["uplink_device_id"] and not row["monitors"]
         ),
         "conflicts": database.fetch_one("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'")["n"],
     }
@@ -701,6 +718,7 @@ def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
         """SELECT e.id,e.name,e.type,e.status,e.ip_address,e.mac_address,e.hostname,e.vendor,
                   e.first_seen_at,e.last_seen_at,e.uplink_device_id,d.name AS uplink_device_name,
                   d.type AS uplink_device_type,
+                  (SELECT m.name FROM physical_devices m WHERE m.monitor_entity_id=e.id) AS monitor_for,
                   (SELECT GROUP_CONCAT(p.name,', ') FROM provider_records pr
                      JOIN providers p ON p.id=pr.provider_id WHERE pr.entity_id=e.id) AS sources
            FROM entities e
@@ -711,7 +729,7 @@ def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
     for row in rows:
         # Een poortloze uplink telt net zo goed als toegewezen: het ding heeft
         # een plek gekregen, alleen zonder kabel.
-        row["linked"] = row["id"] in linked or bool(row["uplink_device_id"])
+        row["linked"] = row["id"] in linked or bool(row["uplink_device_id"]) or bool(row["monitor_for"])
     return rows
 
 
@@ -910,6 +928,14 @@ def delete_entity(entity_id: str, confirm: str, auth: AuthContext = Depends(writ
     return {"ok": True}
 
 
+def resolve_monitor(entity_id: str | None) -> str | None:
+    """De entity waarvan een netwerkapparaat zijn status leent."""
+    entity_id = (entity_id or "").strip() or None
+    if entity_id and not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Statusmonitor niet gevonden")
+    return entity_id
+
+
 def create_device_ports(connection: sqlite3.Connection, device_id: str, device_type: str, first: int, last: int) -> None:
     for number in range(first, last + 1):
         if device_type == "patch_panel":
@@ -937,9 +963,10 @@ def create_physical_device(payload: PhysicalDeviceInput, auth: AuthContext = Dep
     position = database.fetch_one("SELECT COALESCE(MAX(position),-1)+1 AS n FROM physical_devices")["n"]
     with database.transaction() as connection:
         connection.execute(
-            """INSERT INTO physical_devices(id,name,type,model,location,notes,position,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, position, now, now),
+            """INSERT INTO physical_devices(id,name,type,model,location,notes,position,monitor_entity_id,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (device_id, payload.name.strip(), payload.type, payload.model, payload.location, payload.notes,
+             position, resolve_monitor(payload.monitor_entity_id), now, now),
         )
         create_device_ports(connection, device_id, payload.type, 1, payload.ports)
     database.audit(auth.user_id, "physical_device.create", "physical_device", device_id, payload.model_dump())
@@ -968,8 +995,9 @@ def update_physical_device(device_id: str, payload: PhysicalDeviceInput, auth: A
     now = utcnow()
     with database.transaction() as connection:
         connection.execute(
-            "UPDATE physical_devices SET name=?,type=?,model=?,location=?,notes=?,updated_at=? WHERE id=?",
-            (payload.name.strip(), payload.type, payload.model, payload.location, payload.notes, now, device_id),
+            "UPDATE physical_devices SET name=?,type=?,model=?,location=?,notes=?,monitor_entity_id=?,updated_at=? WHERE id=?",
+            (payload.name.strip(), payload.type, payload.model, payload.location, payload.notes,
+             resolve_monitor(payload.monitor_entity_id), now, device_id),
         )
         if payload.ports < port_count:
             connection.execute("DELETE FROM ports WHERE physical_device_id=? AND number>?", (device_id, payload.ports))

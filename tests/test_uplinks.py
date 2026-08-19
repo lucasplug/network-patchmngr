@@ -253,3 +253,80 @@ def test_a_manual_device_can_get_an_uplink_too() -> None:
         assert response.status_code == 200, response.text
         assert response.json()["origin"] == "manual"
         assert response.json()["uplink_device_id"] == "deco-02"
+
+
+# --- statusmonitor voor een netwerkapparaat ---------------------------------
+
+def test_a_switch_borrows_its_status_from_a_monitor() -> None:
+    """Een SG108E draait geen agent, maar is wel te pingen."""
+    monitor = discovery("kuma-switch", "SG108E 01 ping", ip_address="192.168.1.2")
+    with TestClient(app) as client:
+        headers = login(client)
+        # Zonder koppeling weet het apparaat niets.
+        devices = client.get("/api/bootstrap").json()["physical_devices"]
+        assert next(d for d in devices if d["id"] == "switch-01")["status"] == "unknown"
+
+        saved = client.patch(
+            "/api/physical-devices/switch-01", headers=headers,
+            json={"name": "TP-Link SG108E 01", "type": "switch", "ports": 8, "monitor_entity_id": monitor},
+        )
+        assert saved.status_code == 200, saved.text
+
+        devices = client.get("/api/bootstrap").json()["physical_devices"]
+        switch = next(d for d in devices if d["id"] == "switch-01")
+        assert switch["status"] == "up"
+        assert switch["monitor_name"] == "SG108E 01 ping"
+
+    # Gaat de monitor down, dan de switch ook.
+    with database.transaction() as connection:
+        connection.execute("UPDATE entities SET status='down' WHERE id=?", (monitor,))
+    with TestClient(app) as client:
+        login(client)
+        devices = client.get("/api/bootstrap").json()["physical_devices"]
+        assert next(d for d in devices if d["id"] == "switch-01")["status"] == "down"
+
+
+def test_the_monitor_is_not_drawn_twice() -> None:
+    """De monitor gaat óver het apparaat; twee knopen zou hetzelfde ding dubbel tonen."""
+    monitor = discovery("kuma-deco", "Deco 01 ping", ip_address="192.168.1.3")
+    with TestClient(app) as client:
+        headers = login(client)
+        before = client.get("/api/bootstrap").json()["topology"]["nodes"]
+        assert any(node["id"] == f"entity:{monitor}" for node in before)
+
+        client.patch(
+            "/api/physical-devices/deco-01", headers=headers,
+            json={"name": "Deco XE75 Pro 01", "type": "mesh_ap", "ports": 3, "monitor_entity_id": monitor},
+        )
+        nodes = client.get("/api/bootstrap").json()["topology"]["nodes"]
+        assert not any(node["id"] == f"entity:{monitor}" for node in nodes)
+        # De status is niet verdwenen maar verhuisd naar het apparaat.
+        assert next(node for node in nodes if node["id"] == "physical:deco-01")["status"] == "up"
+
+        # En hij telt niet meer als losse, ongekoppelde vondst.
+        row = next(item for item in client.get("/api/discoveries").json() if item["id"] == monitor)
+        assert row["monitor_for"] == "Deco XE75 Pro 01"
+        assert row["linked"] is True
+
+
+def test_an_unknown_monitor_is_refused() -> None:
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.patch(
+            "/api/physical-devices/switch-02", headers=headers,
+            json={"name": "TP-Link SG108E 02", "type": "switch", "ports": 8, "monitor_entity_id": "bestaat-niet"},
+        )
+        assert response.status_code == 404
+
+
+def test_removing_the_monitor_brings_the_node_back() -> None:
+    monitor = discovery("kuma-los", "los ping", ip_address="192.168.1.4")
+    with TestClient(app) as client:
+        headers = login(client)
+        body = {"name": "TP-Link SG108E 02", "type": "switch", "ports": 8}
+        client.patch("/api/physical-devices/switch-02", headers=headers, json={**body, "monitor_entity_id": monitor})
+        client.patch("/api/physical-devices/switch-02", headers=headers, json={**body, "monitor_entity_id": None})
+        nodes = client.get("/api/bootstrap").json()["topology"]["nodes"]
+        assert any(node["id"] == f"entity:{monitor}" for node in nodes)
+        devices = client.get("/api/bootstrap").json()["physical_devices"]
+        assert next(d for d in devices if d["id"] == "switch-02")["status"] == "unknown"

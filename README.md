@@ -93,6 +93,7 @@ AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de b
 ## Topologie en relaties
 
 - Een fysieke poortkoppeling tekent automatisch een fysieke relatie.
+- Een netwerkapparaat heeft geen eigen status: een switch draait geen agent. Koppel onder **Statusmonitor** de observatie die erover gaat — een Uptime Kuma-ping op het beheer-IP, of de ping-discovery van dat adres — en het apparaat krijgt diens status. Die observatie verdwijnt dan als losse knoop, want anders staat hetzelfde ding er twee keer.
 - Een device kan ook zónder poort aan een netwerkapparaat hangen: wifi-clients op een Deco, of een switchpoort die je nog niet weet. Die verbinding is onderbroken getekend.
 - Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.
 - Relaties die niet betrouwbaar zijn af te leiden — bijvoorbeeld de onderlinge bekabeling van Deco-units zonder SNMP — teken je zelf in **Topologie → Bewerken → Relatie**.

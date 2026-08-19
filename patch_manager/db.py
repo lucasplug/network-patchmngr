@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS physical_devices (
   location TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   position INTEGER NOT NULL DEFAULT 0,
+  -- Welke observatie vertelt of dít apparaat aan staat. Een switch draait geen
+  -- agent, maar is wel te pingen: koppel de Uptime Kuma-monitor of de
+  -- ping-discovery van zijn beheer-IP en het apparaat krijgt diens status.
+  monitor_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

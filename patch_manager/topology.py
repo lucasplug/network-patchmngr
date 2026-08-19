@@ -63,7 +63,18 @@ def sync_topology_catalog(database: Database) -> None:
                  40 + index * 220, 230, 190, 64, now, now),
             )
 
-        entities = connection.execute("SELECT * FROM entities WHERE ignored=0 AND archived=0").fetchall()
+        # Een monitor die de status van een netwerkapparaat levert, hoort niet
+        # ook nog als losse knoop in beeld: dan staat hetzelfde ding er twee
+        # keer. Zijn status zit al op het apparaat.
+        entities = connection.execute(
+            """SELECT * FROM entities WHERE ignored=0 AND archived=0
+                 AND id NOT IN (SELECT monitor_entity_id FROM physical_devices
+                                WHERE monitor_entity_id IS NOT NULL)"""
+        ).fetchall()
+        connection.execute(
+            """DELETE FROM topology_nodes WHERE reference_type='entity' AND reference_id IN
+                 (SELECT monitor_entity_id FROM physical_devices WHERE monitor_entity_id IS NOT NULL)"""
+        )
         for index, entity in enumerate(entities):
             node_id = f"entity:{entity['id']}"
             parent_node_id = f"entity:{entity['parent_id']}" if entity["parent_id"] else None
@@ -130,10 +141,20 @@ def sync_topology_catalog(database: Database) -> None:
 
 def topology_payload(database: Database) -> dict[str, Any]:
     sync_topology_catalog(database)
+    # Een netwerkapparaat heeft geen eigen status; het leent die van de
+    # observatie die erover gaat (monitor_entity_id). Vandaar de tweede join.
     nodes = database.fetch_all(
-        """SELECT n.*,e.status,e.ip_address,e.hostname,e.last_seen_at
-           FROM topology_nodes n LEFT JOIN entities e
+        """SELECT n.*,
+                  COALESCE(e.status, m.status) AS status,
+                  COALESCE(e.ip_address, m.ip_address) AS ip_address,
+                  COALESCE(e.hostname, m.hostname) AS hostname,
+                  COALESCE(e.last_seen_at, m.last_seen_at) AS last_seen_at
+           FROM topology_nodes n
+           LEFT JOIN entities e
              ON n.reference_type='entity' AND e.id=n.reference_id
+           LEFT JOIN physical_devices d
+             ON n.reference_type='physical' AND d.id=n.reference_id
+           LEFT JOIN entities m ON m.id=d.monitor_entity_id
            WHERE n.hidden=0 ORDER BY n.created_at"""
     )
     metrics = entity_metrics(database)
