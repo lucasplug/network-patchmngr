@@ -92,7 +92,8 @@ AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de b
 
 ## Topologie en relaties
 
-- Een fysieke poortkoppeling tekent automatisch een fysieke relatie.
+- Een fysieke poortkoppeling tekent automatisch een fysieke relatie. Dat geldt ook voor een kabel tussen twee netwerkapparaten — de glasvezel-ONT naar een Deco, of switch naar switch. Een patchpaneel ertussen wordt doorlopen, niet als extra knoop getekend.
+- De **glasvezel-ONT** staat als netwerkapparaat met één LAN-poort in de inventaris; het internet komt daar binnen. Waar die poort heen gaat trek je zelf in de patchview, via **Doorverbinding** in de poortlade.
 - Een netwerkapparaat heeft geen eigen status: een switch draait geen agent. Koppel onder **Statusmonitor** de observatie die erover gaat — een Uptime Kuma-ping op het beheer-IP, of de ping-discovery van dat adres — en het apparaat krijgt diens status. Die observatie verdwijnt dan als losse knoop, want anders staat hetzelfde ding er twee keer.
 - Een device kan ook zónder poort aan een netwerkapparaat hangen: wifi-clients op een Deco, of een switchpoort die je nog niet weet. Die verbinding is onderbroken getekend.
 - Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.

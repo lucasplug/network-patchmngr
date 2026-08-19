@@ -13,6 +13,7 @@ issue-tracker — één regel per punt volstaat.
 | 5 | De rol van een apparaat is niet af te lezen | `type` was een vrij tekstveld met twee losse keuzelijsten die geen van beide dekten wat providers opleveren | Eén lijst in `patch_manager/categories.py`, gebruikt voor keuzelijsten, iconen en labels |
 | 6 | Kan ik een Glances- of Uptime Kuma-entity aan switch 1 of 2 hangen? | Deels. De poortloze uplink accepteerde ook containers, VM's en monitors — die hebben geen netwerkpoort. En een overgenomen (handmatig) device kon helemaal geen uplink meer krijgen, want het toewijsscherm toont alleen discoveries | `attachable` per categorie, afgedwongen in `PUT /uplink`; uplinkveld in het devicedialoog |
 | 7 | Een SG108E kan wél in Uptime Kuma gemonitord worden of hij online is | `physical_devices` had helemaal geen status. Switches en Deco's stonden altijd kleurloos in beeld, terwijl de ping-observatie ernaast als losse entity rondzweefde | `physical_devices.monitor_entity_id`: het apparaat leent de status van de observatie die erover gaat |
+| 8 | De glasvezel-ONT ontbreekt; die verzorgt het internet en gaat bedraad naar een Deco | Er was geen ONT-categorie, en erger: een kabel tússen twee netwerkapparaten werd niet in de topologie getekend. `trace_entity()` gaf `None` zodra een kabel op een poort eindigde in plaats van op een device | Categorie `ont` + geseed apparaat; `trace_far_port()` tekent apparaat-naar-apparaat als `trunk:`-relatie |
 
 ## Bijvangst bij deze punten
 
@@ -31,6 +32,16 @@ issue-tracker — één regel per punt volstaat.
   dat type. De poortloze koppeling heet daarom `portless` (of `wireless` op een
   access point); anders werd de internetlijn óók gestippeld. Gevonden door de
   topologie in een browser te bekijken, niet door de tests.
+- **`special:router` was een spookknoop.** Een losse topologieknoop met
+  subtitel "Deco XE75 Pro" die nergens aan vastzat — dezelfde dubbeling als bij
+  de monitors. Vervangen door de echte ONT, waar het internet ook binnenkomt.
+- **Een patchpaneel wordt doorlopen, niet getekend.** De eerste versie van de
+  apparaat-naar-apparaat-relatie tekende ook een lijn naar het paneel zelf.
+  Een poort met een `peer_port_id` is een doorsteek en telt niet als eindpunt.
+- **Uplink én statusmonitor tegelijk liet de topologie omvallen.** Een entity
+  die de status van een apparaat levert krijgt geen eigen knoop meer; de
+  uplinkrelatie ernaartoe bleef wel staan en botste op een foreign key.
+  Gevonden door twee browsercontroles achter elkaar op dezelfde database.
 - **Glances koppelt nu op endpoint in plaats van op hostnaam.** De sleutel van
   een providerrecord is `host:<entity_id>` geworden: verandert de hostnaam van
   een machine, dan blijft het dezelfde rij. Een afwijkende naam levert bij een
@@ -38,6 +49,6 @@ issue-tracker — één regel per punt volstaat.
 
 ## Schema gewijzigd
 
-Punt 3, 4 en 7 wijzigen `db.py` (`entities.uplink_device_id`,
+Punt 3, 4, 7 en 8 wijzigen `db.py` (`entities.uplink_device_id`,
 `physical_devices.monitor_entity_id`, `entity_id` per Glances-endpoint). Er is geen migratiepad: gooi het datavolume weg en begin
 opnieuw.

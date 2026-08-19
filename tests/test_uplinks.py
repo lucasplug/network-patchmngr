@@ -330,3 +330,24 @@ def test_removing_the_monitor_brings_the_node_back() -> None:
         assert any(node["id"] == f"entity:{monitor}" for node in nodes)
         devices = client.get("/api/bootstrap").json()["physical_devices"]
         assert next(d for d in devices if d["id"] == "switch-02")["status"] == "unknown"
+
+
+def test_an_uplinked_device_can_also_be_a_status_monitor() -> None:
+    """Beide tegelijk liet de topologie omvallen op een foreign key."""
+    entity_id = discovery("dubbel", "deco-uplink-en-monitor", ip_address="192.168.1.98")
+    with TestClient(app) as client:
+        headers = login(client)
+        client.put(f"/api/entities/{entity_id}/uplink", headers=headers, json={"physical_device_id": "deco-03"})
+        client.patch(
+            "/api/physical-devices/switch-02", headers=headers,
+            json={"name": "TP-Link SG108E 02", "type": "switch", "ports": 8, "monitor_entity_id": entity_id},
+        )
+        response = client.get("/api/bootstrap")
+        assert response.status_code == 200, response.text
+        topology = response.json()["topology"]
+        # De knoop is weg, dus de uplinkrelatie ernaartoe hoort ook weg te zijn.
+        assert not any(node["id"] == f"entity:{entity_id}" for node in topology["nodes"])
+        assert not any(rel["id"] == f"uplink:{entity_id}" for rel in topology["relations"])
+        # En de switch draagt de status.
+        devices = response.json()["physical_devices"]
+        assert next(d for d in devices if d["id"] == "switch-02")["status"] == "up"

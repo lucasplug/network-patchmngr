@@ -33,6 +33,8 @@ CATEGORIES: list[Category] = [
     Category("mesh_ap", "Mesh access point", "◈", True, False),
     Category("access_point", "Access point", "◈", True, False),
     Category("patch_panel", "Patchpanel", "▦", True, False),
+    # De glasvezel-ONT: één LAN-poort waar het hele huis achter hangt.
+    Category("ont", "ONT (glasvezel)", "◎", True, False),
     Category("router", "Router/modem", "⇄", False, True),
     Category("host", "Host", "▣", False, True),
     Category("nas", "NAS", "▥", False, True),

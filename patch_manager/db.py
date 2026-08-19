@@ -341,6 +341,9 @@ DEVICE_TEMPLATES = [
     ("deco-01", "Deco XE75 Pro 01", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
     ("deco-02", "Deco XE75 Pro 02", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
     ("deco-03", "Deco XE75 Pro 03", "mesh_ap", "TP-Link Deco XE75 Pro", 3, [2500, 1000, 1000]),
+    # De glasvezelaansluiting. Waar de LAN-poort heen gaat weet alleen jij, dus
+    # die kabel trek je zelf in de patchview.
+    ("ont-01", "Glasvezel-ONT", "ont", "", 1, [1000]),
 ]
 
 PROVIDER_TEMPLATES = [
@@ -440,16 +443,20 @@ class Database:
                VALUES('special:internet','special','internet','internet','','external',510,24,150,52,1,?,?)""",
             (now, now),
         )
+        # Het internet komt binnen op de ONT, niet op een losse 'router'-knoop.
+        # Die knoop was een kopie van een Deco die nergens aan vastzat.
+        # De knoop moet er staan vóór de relatie: topology_relations verwijst
+        # ernaar, en sync_topology_catalog draait pas na het seeden.
         connection.execute(
             """INSERT OR IGNORE INTO topology_nodes
                (id,reference_type,reference_id,label,subtitle,node_type,x,y,width,height,manual_position,created_at,updated_at)
-               VALUES('special:router','special','router','router','Deco XE75 Pro','router',490,116,190,62,1,?,?)""",
+               VALUES('physical:ont-01','physical','ont-01','Glasvezel-ONT','','ont',510,116,190,62,1,?,?)""",
             (now, now),
         )
         connection.execute(
             """INSERT OR IGNORE INTO topology_relations
                (id,from_node_id,to_node_id,relation_type,label,source,locked,created_at,updated_at)
-               VALUES('manual:internet-router','special:internet','special:router','uplink','','manual',1,?,?)""",
+               VALUES('manual:internet-ont','special:internet','physical:ont-01','uplink','glasvezel','manual',1,?,?)""",
             (now, now),
         )
 
