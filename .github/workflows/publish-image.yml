@@ -10,6 +10,11 @@ name: Publish container image
 on:
   push:
     branches: [main]
+    # Een release-tag levert een image met dat versienummer erin. Dat is wat
+    # je nodig hebt om terug te rollen: het migratieregister weigert een
+    # database die van een nieuwere versie is, dus dan moet er een oudere
+    # image zijn om naar terug te gaan. `latest` helpt je daar niet.
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -23,6 +28,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Controleer dat de tag klopt met __version__
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          code="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' patch_manager/__init__.py)"
+          # Anders meldt de container een andere versie dan de release heet, en
+          # dat is precies het misverstand waar je bij een storing op vastloopt.
+          if [ "$tag" != "$code" ]; then
+            echo "::error::Tag v$tag komt niet overeen met __version__ ($code) in patch_manager/__init__.py"
+            exit 1
+          fi
+          echo "Tag en __version__ komen overeen: $code"
+
       - name: Build and push
         env:
           REGISTRY: ghcr.io
@@ -31,12 +50,27 @@ jobs:
           set -euo pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          docker build \
-            --tag "$IMAGE:latest" \
-            --tag "$IMAGE:${GITHUB_SHA::7}" \
+
+          # Een tag mag `latest` niet verzetten: tag je een ouder commit, dan
+          # zou latest achteruit springen.
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF#refs/tags/v}"; names=("$version") ;;
+            *)            version=""; names=("latest") ;;
+          esac
+          names+=("${GITHUB_SHA::7}")
+
+          args=()
+          for name in "${names[@]}"; do args+=(--tag "$IMAGE:$name"); done
+          if [ -n "$version" ]; then
+            args+=(--label "org.opencontainers.image.version=$version")
+          fi
+
+          docker build "${args[@]}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             .
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:${GITHUB_SHA::7}"
-          echo "Gepubliceerd: $IMAGE:latest en $IMAGE:${GITHUB_SHA::7}"
+
+          for name in "${names[@]}"; do
+            docker push "$IMAGE:$name"
+            echo "Gepubliceerd: $IMAGE:$name"
+          done
