@@ -725,6 +725,13 @@ class ProviderManager:
             timeout=20, verify=bool(config.get("verify_tls", True)), headers=headers
         ) as client:
             response = await client.get(f"{base_url}/api2/json/cluster/resources")
+            # Een kale "401" helpt hier niet: het token-ID wordt uit twee velden
+            # samengesteld, dus laat zien wat er daadwerkelijk is verstuurd.
+            if response.status_code == 401:
+                raise ValueError(
+                    f"HTTP 401: Proxmox weigert token '{user}!{token_name}'. Controleer de gebruiker, "
+                    "het token-ID en het geheim, en of het token leesrechten heeft."
+                )
             response.raise_for_status()
         resources = response.json().get("data", [])
         kinds = {"node": 0, "qemu": 0, "lxc": 0}

@@ -17,6 +17,12 @@ def login(client: TestClient) -> dict[str, str]:
     return {"X-CSRF-Token": response.json()["csrf_token"]}
 
 
+def wizard_provider(client: TestClient, provider_id: str) -> dict:
+    """De providerkaart zoals de wizard hem uit /api/bootstrap krijgt."""
+    providers_payload = client.get("/api/bootstrap").json()["providers"]
+    return next(row for row in providers_payload if row["id"] == provider_id)
+
+
 def make_discovery(external_id: str, name: str, **kwargs) -> str:
     return providers._store_record(
         "dhcp-arp", external_id, "network_device", {"ip": kwargs.get("ip_address", "192.168.1.60")},
@@ -135,6 +141,69 @@ def test_provider_test_endpoint_summarizes_without_saving(monkeypatch: pytest.Mo
     # Niets opgeslagen: geen secret, provider blijft uit.
     assert database.fetch_one("SELECT provider_id FROM provider_secrets WHERE provider_id='proxmox'") is None
     assert database.fetch_one("SELECT enabled FROM providers WHERE id='proxmox'")["enabled"] == 0
+
+
+def test_proxmox_exposes_the_fields_the_token_id_is_built_from() -> None:
+    """Zonder deze velden stuurt de wizard de sjabloonwaarden uit db.py mee."""
+    with TestClient(app) as client:
+        login(client)
+        proxmox = wizard_provider(client, "proxmox")
+        assert [field["key"] for field in proxmox["config_fields"]] == ["user", "token_name"]
+        assert [field["key"] for field in proxmox["credential_fields"]] == ["token_secret"]
+
+
+def test_uptime_kuma_exposes_its_status_page_slug() -> None:
+    with TestClient(app) as client:
+        login(client)
+        kuma = wizard_provider(client, "uptime-kuma")
+        assert [field["key"] for field in kuma["config_fields"]] == ["status_page_slug"]
+
+
+def test_providers_without_extra_config_report_an_empty_list() -> None:
+    with TestClient(app) as client:
+        login(client)
+        portainer = wizard_provider(client, "portainer")
+        assert portainer["config_fields"] == []
+
+
+def test_proxmox_token_id_comes_from_the_submitted_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wat in de wizard is ingevuld moet in de header staan, niet het sjabloon."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        return httpx.Response(200, json={"data": []})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: original(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.post(
+            "/api/providers/proxmox/test", headers=headers,
+            json={"config": {"base_url": "https://pve.local:8006", "user": "root@pam", "token_name": "patchmngr"},
+                  "credentials": {"token_secret": "geheim"}},
+        )
+        assert response.status_code == 200, response.text
+    assert seen == ["PVEAPIToken=root@pam!patchmngr=geheim"]
+
+
+def test_proxmox_401_names_the_token_it_tried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Het token-ID komt uit twee velden; de fout moet zeggen welk het probeerde."""
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: original(*a, **{
+        **kw, "transport": httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+    }))
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.post(
+            "/api/providers/proxmox/test", headers=headers,
+            json={"config": {"base_url": "https://pve.local:8006", "user": "root@pam", "token_name": "typfout"},
+                  "credentials": {"token_secret": "n1et-tonen"}},
+        )
+        body = response.json()
+        assert body["ok"] is False
+        assert "root@pam!typfout" in body["summary"]
+        assert "n1et-tonen" not in body["summary"]
 
 
 def test_provider_test_reports_failure_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:

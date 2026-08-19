@@ -838,9 +838,13 @@ function renderWizardProviders() {
     const provider = state.data.providers.find(item => item.id === id);
     if (!provider) return "";
     const fields = provider.credential_fields || [];
+    // Config vóór credentials: een tokengeheim invullen heeft geen zin zolang
+    // de gebruiker en het token-ID ernaast nog op de sjabloonwaarde staan.
+    const configFields = provider.config_fields || [];
     return `<article class="provider-card" data-wizard-provider="${esc(id)}">
       <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(provider.type)}</div></div></div></div>
       <label class="tiny">Basis-URL<input data-wizard-url placeholder="https://host:poort" value="${esc(provider.config.base_url || (provider.config.endpoints?.[0]?.url) || "")}"></label>
+      ${configFields.map(field => `<label class="tiny">${esc(field.label)}<input data-wizard-config="${esc(field.key)}" placeholder="${esc(field.placeholder || "")}" value="${esc(provider.config[field.key] ?? "")}"></label>`).join("")}
       ${fields.map(field => `<label class="tiny">${esc(field.label)}<input data-wizard-cred="${esc(field.key)}" type="${field.type === "password" ? "password" : "text"}" autocomplete="new-password"></label>`).join("")}
       <div class="provider-actions">
         <button class="button" data-wizard-test="${esc(id)}">Test verbinding</button>
@@ -858,6 +862,7 @@ function wizardProviderPayload(card) {
   // Glances gebruikt een endpointlijst, de rest één base_url.
   if (provider.type === "glances") config.endpoints = url ? [{name: "host", url}] : [];
   else config.base_url = url;
+  $$("[data-wizard-config]", card).forEach(input => { config[input.dataset.wizardConfig] = input.value.trim(); });
   const credentials = {};
   $$("[data-wizard-cred]", card).forEach(input => { if (input.value.trim()) credentials[input.dataset.wizardCred] = input.value; });
   return {provider, config, credentials};

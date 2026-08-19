@@ -75,14 +75,16 @@ Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de UR
 | Provider | Inloggegevens in Admin | Opmerking |
 |---|---|---|
 | DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde `/24`-subnets; maximaal 1024 adressen per subnet |
-| Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints |
+| Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints; de slug van de statuspagina hoort erbij |
 | Glances | gebruikersnaam en wachtwoord | Ondersteunt meerdere API-v4-endpoints |
 | Portainer | API-key | Gebruik een aparte gebruiker met minimale environmentrechten |
-| Proxmox | API-tokengeheim | Gebruik een read-only API-token |
+| Proxmox | API-tokengeheim | Gebruik een read-only API-token; vul ook de gebruiker en het token-ID in |
 | AdGuard Home | gebruikersnaam en wachtwoord | Importeert clients en DNS-rewrites via `/control/clients` en `/control/rewrite/list` |
 | Nginx Proxy Manager | API-token of gebruikersnaam en wachtwoord | Importeert proxyhosts; de adapter schrijft niets terug naar NPM |
 
 De meegeleverde configuratie bevat alvast de adressen uit het ontwerp voor Docker VM (`192.168.1.12`) en Proxmox (`192.168.1.100`). Controleer die voordat je providers inschakelt.
+
+Proxmox stelt zijn tokenkop samen uit drie delen: `PVEAPIToken=<gebruiker>!<token-ID>=<geheim>`. In Proxmox staat dat onder *Datacenter → Permissions → API Tokens* als bijvoorbeeld `root@pam!patchmanager`. De wizard vraagt de eerste twee los uit; alleen het geheim wordt versleuteld opgeslagen.
 
 Bij zelfondertekende certificaten kan `verify_tls` tijdelijk op `false`. Een eigen lokale CA en `true` is veiliger.
 

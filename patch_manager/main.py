@@ -236,6 +236,20 @@ PROVIDER_CREDENTIAL_FIELDS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+# Configuratie die de wizard náást de basis-URL moet uitvragen. Zonder dit
+# stuurt de wizard de sjabloonwaarden uit db.py mee en krijg je een 401 op een
+# token dat je nooit hebt kunnen invullen. Providers die genoeg hebben aan een
+# URL staan hier niet in.
+PROVIDER_CONFIG_FIELDS: dict[str, list[dict[str, str]]] = {
+    "proxmox": [
+        {"key": "user", "label": "Gebruiker (user@realm)", "placeholder": "root@pam"},
+        {"key": "token_name", "label": "Token-ID (deel na de !)", "placeholder": "patchmanager"},
+    ],
+    "uptime_kuma": [
+        {"key": "status_page_slug", "label": "Statuspagina-slug", "placeholder": "homelab"},
+    ],
+}
+
 
 def app_title() -> str:
     row = database.fetch_one("SELECT value FROM app_meta WHERE key='app_title'")
@@ -452,6 +466,7 @@ def serialize_provider(row: dict[str, Any]) -> dict[str, Any]:
     fields = PROVIDER_CREDENTIAL_FIELDS.get(row["type"], [])
     configured = provider_secrets.get(row["id"])
     row["credential_fields"] = fields
+    row["config_fields"] = PROVIDER_CONFIG_FIELDS.get(row["type"], [])
     row["credentials_configured"] = {field["key"]: field["key"] in configured for field in fields}
     return row
 
