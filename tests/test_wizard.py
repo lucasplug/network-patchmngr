@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from patch_manager import providers as providers_module
 from patch_manager.main import app, database, providers
+from patch_manager.db import utcnow
 from patch_manager.providers import EMPTY_MAC
 
 from tests.conftest import CREDENTIALS
@@ -21,6 +24,14 @@ def wizard_provider(client: TestClient, provider_id: str) -> dict:
     """De providerkaart zoals de wizard hem uit /api/bootstrap krijgt."""
     providers_payload = client.get("/api/bootstrap").json()["providers"]
     return next(row for row in providers_payload if row["id"] == provider_id)
+
+
+def discovery_in_scan(ip: str) -> str:
+    """Een vondst zoals de ARP-scan hem opslaat."""
+    return providers._store_record(
+        "dhcp-arp", ip, "network_device", {"ip": ip},
+        name=ip, entity_type="device", status="up", ip_address=ip,
+    )
 
 
 def make_discovery(external_id: str, name: str, **kwargs) -> str:
@@ -292,3 +303,43 @@ def test_dhcp_arp_test_refuses_untrusted_subnet() -> None:
         assert response.status_code == 200
         assert response.json()["ok"] is False
         assert "PATCH_TRUSTED_SUBNETS" in response.json()["summary"]
+
+
+def test_a_device_that_stops_answering_is_marked_down() -> None:
+    """Zonder dit blijft alles voor altijd 'up' en is de uptime-balk zinloos."""
+    entity_id = discovery_in_scan("192.0.2.5")
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+    # Volgende ronde: wel gescand, niet gevonden.
+    absent = providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    assert absent == 1
+    row = database.fetch_one("SELECT status,last_seen_at FROM entities WHERE id=?", (entity_id,))
+    assert row["status"] == "down"
+    # last_seen_at blijft staan: dat is wanneer het ding er nog wél was.
+    assert row["last_seen_at"] is not None
+
+
+def test_a_device_outside_the_scanned_range_is_left_alone() -> None:
+    """Buiten het gescande bereik hebben we niet gekeken, dus weten we niets."""
+    entity_id = discovery_in_scan("198.51.100.7")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+
+def test_a_device_that_answered_stays_up() -> None:
+    entity_id = discovery_in_scan("192.0.2.6")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], {"192.0.2.6"})
+    assert database.fetch_one("SELECT status FROM entities WHERE id=?", (entity_id,))["status"] == "up"
+
+
+def test_marking_absent_refreshes_the_observation() -> None:
+    """Anders zet de vervaldecay het apparaat meteen weer op 'unknown'."""
+    entity_id = discovery_in_scan("192.0.2.8")
+    providers._mark_absent("dhcp-arp", [ipaddress.ip_network("192.0.2.0/24")], set())
+    row = database.fetch_one(
+        """SELECT value_json,expires_at FROM observations
+           WHERE entity_id=? AND field='status' ORDER BY observed_at DESC LIMIT 1""",
+        (entity_id,),
+    )
+    assert row["value_json"] == '"down"'
+    assert row["expires_at"] > utcnow()

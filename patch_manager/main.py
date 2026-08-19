@@ -135,6 +135,16 @@ class ProviderInput(BaseModel):
     clear_credentials: list[str] = Field(default_factory=list)
 
 
+class AppLinkInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=200)
+    icon: str = Field(default="", max_length=8)
+    group_name: str = Field(default="", max_length=60)
+    monitor_entity_id: str | None = Field(default=None, max_length=64)
+    position: int = Field(default=0, ge=0, le=999)
+
+
 class ProviderCreateInput(BaseModel):
     """Een tweede omgeving van een soort die je al hebt."""
 
@@ -597,6 +607,7 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     return {
         "site": {"title": app_title(), "timezone": "Europe/Amsterdam"},
         "categories": categories.payload(),
+        "app_links": serialize_app_links(),
         "counts": counts,
         "physical_devices": nested_physical_devices(),
         "entities": entities,
@@ -635,6 +646,9 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     """Licht poll-endpoint: statussen en tellers, geen volledige inventaris."""
     return {
         "counts": inventory_counts(),
+        # De appstatus komt van dezelfde entities, maar het dashboard wil de
+        # tegels los kunnen bijwerken zonder een volledige bootstrap.
+        "app_links": serialize_app_links(),
         "entities": database.fetch_all(
             "SELECT id,status,status_updated_at,last_seen_at FROM entities"
         ),
@@ -1160,6 +1174,70 @@ def port_cable_clear(port_id: str, auth: AuthContext = Depends(write_auth)) -> d
     with database.transaction() as connection:
         connection.execute("DELETE FROM cables WHERE a_port_id=? OR b_port_id=?", (port_id, port_id))
     database.audit(auth.user_id, "port.cable.clear", "port", port_id)
+    return {"ok": True}
+
+
+def app_link_url(value: str) -> str:
+    """Alleen http(s).
+
+    Een tegel is een <a href>; zonder deze controle kun je javascript: in je
+    eigen dashboard zetten, en dat draait dan met je sessie erbij.
+    """
+    url = value.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(422, "Een link moet met http:// of https:// beginnen")
+    return url
+
+
+def serialize_app_links() -> list[dict[str, Any]]:
+    return database.fetch_all(
+        """SELECT a.*, e.name AS monitor_name, COALESCE(e.status,'unknown') AS status,
+                  e.status_updated_at
+           FROM app_links a LEFT JOIN entities e ON e.id=a.monitor_entity_id
+           ORDER BY a.group_name, a.position, a.name"""
+    )
+
+
+@app.post("/api/app-links")
+def create_app_link(payload: AppLinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    link_id = str(uuid.uuid4())
+    now = utcnow()
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO app_links(id,name,url,description,icon,group_name,monitor_entity_id,position,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (link_id, payload.name.strip(), app_link_url(payload.url), payload.description,
+             payload.icon.strip(), payload.group_name.strip(),
+             resolve_monitor(payload.monitor_entity_id), payload.position, now, now),
+        )
+    database.audit(auth.user_id, "app_link.create", "app_link", link_id, {"name": payload.name})
+    return database.fetch_one("SELECT * FROM app_links WHERE id=?", (link_id,))
+
+
+@app.patch("/api/app-links/{link_id}")
+def update_app_link(link_id: str, payload: AppLinkInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    if not database.fetch_one("SELECT id FROM app_links WHERE id=?", (link_id,)):
+        raise HTTPException(404, "App niet gevonden")
+    with database.transaction() as connection:
+        connection.execute(
+            """UPDATE app_links SET name=?,url=?,description=?,icon=?,group_name=?,
+               monitor_entity_id=?,position=?,updated_at=? WHERE id=?""",
+            (payload.name.strip(), app_link_url(payload.url), payload.description,
+             payload.icon.strip(), payload.group_name.strip(),
+             resolve_monitor(payload.monitor_entity_id), payload.position, utcnow(), link_id),
+        )
+    database.audit(auth.user_id, "app_link.update", "app_link", link_id, {"name": payload.name})
+    return database.fetch_one("SELECT * FROM app_links WHERE id=?", (link_id,))
+
+
+@app.delete("/api/app-links/{link_id}")
+def delete_app_link(link_id: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    link = database.fetch_one("SELECT name FROM app_links WHERE id=?", (link_id,))
+    if not link:
+        raise HTTPException(404, "App niet gevonden")
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM app_links WHERE id=?", (link_id,))
+    database.audit(auth.user_id, "app_link.delete", "app_link", link_id, {"name": link["name"]})
     return {"ok": True}
 
 

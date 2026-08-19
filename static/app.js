@@ -117,6 +117,7 @@ async function pollSummary() {
       if (port.entity_id && byId.has(port.entity_id)) port.entity_status = byId.get(port.entity_id).status;
     }));
     state.data.counts = summary.counts;
+    state.data.app_links = summary.app_links || state.data.app_links;
     state.data.speedtest = {...state.data.speedtest, ...summary.speedtest};
     renderAll();
     stampRefresh();
@@ -128,6 +129,7 @@ function renderAll() {
   $("#app-settings-form").elements.title.value = state.data.site.title;
   renderSummary();
   renderPatch();
+  renderApps();
   renderTopology();
   renderAdmin();
   renderSpeedtest();
@@ -477,6 +479,7 @@ function switchTab(tab) {
   $$(".tab").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
   $$(".view").forEach(view => view.classList.toggle("active", view.id === `${tab}-view`));
   if (tab === "topology") renderTopology();
+  if (tab === "apps") renderApps();
 }
 
 function openPort(portId, deviceId) {
@@ -535,6 +538,90 @@ function closeDrawer() {
   $("#port-drawer").classList.remove("open");
   $("#port-drawer").setAttribute("aria-hidden", "true");
 }
+
+/* ------------------------------------------------------------------ apps */
+// Snelkoppelingen naar eigen diensten. De status komt van dezelfde
+// monitor-entities als bij netwerkapparaten: één mechanisme, niet twee.
+function renderApps() {
+  const links = state.data.app_links || [];
+  if (!links.length) {
+    $("#apps-grid").innerHTML = `<div class="empty-state">Nog geen apps. Voeg er een toe met <b>+ App</b>.</div>`;
+    return;
+  }
+  const groups = new Map();
+  links.forEach(link => {
+    const key = link.group_name || "Overig";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(link);
+  });
+  $("#apps-grid").innerHTML = [...groups.entries()].map(([group, items]) => `
+    <section class="app-group">
+      <div class="section-bar"><span>${esc(group)}</span><span class="muted">${items.length}</span></div>
+      <div class="app-cards">${items.map(link => `
+        <a class="app-card glass" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">
+          <span class="app-icon">${esc(link.icon || link.name.slice(0, 2).toUpperCase())}</span>
+          <span class="app-body"><strong>${esc(link.name)}</strong><small>${esc(link.description || hostOf(link.url))}</small></span>
+          <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}</span>
+          <button class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>
+        </a>`).join("")}</div>
+    </section>`).join("");
+}
+
+function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
+
+function openApp(linkId = "") {
+  const form = $("#app-form");
+  const link = linkId ? (state.data.app_links || []).find(item => item.id === linkId) : null;
+  form.reset();
+  form.elements.link_id.value = linkId;
+  $("#app-dialog-title").textContent = link ? "App bewerken" : "App toevoegen";
+  $("#app-delete").classList.toggle("hidden", !link);
+  $("#app-monitor-select").innerHTML = `<option value="">— geen statusmonitor —</option>${
+    state.data.entities.filter(entity => !entity.archived).map(entity =>
+      `<option value="${esc(entity.id)}"${entity.id === link?.monitor_entity_id ? " selected" : ""}>${esc(entity.name)} · ${esc(categoryLabel(entity.type))}</option>`).join("")}`;
+  if (link) ["name","url","description","icon","group_name","position"].forEach(key => form.elements[key].value = link[key] ?? "");
+  $("#app-dialog").showModal();
+}
+
+$("#new-app-button").addEventListener("click", () => openApp());
+
+$("#apps-grid").addEventListener("click", event => {
+  const edit = event.target.closest("[data-app-edit]");
+  if (!edit) return;
+  // De kaart is één grote link; bewerken mag hem niet openen.
+  event.preventDefault();
+  openApp(edit.dataset.appEdit);
+});
+
+$("#app-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = Object.fromEntries(new FormData(form));
+  const linkId = payload.link_id;
+  delete payload.link_id;
+  payload.position = Number(payload.position || 0);
+  payload.monitor_entity_id = payload.monitor_entity_id || null;
+  try {
+    await api(linkId ? `/api/app-links/${linkId}` : "/api/app-links", {method: linkId ? "PATCH" : "POST", body: JSON.stringify(payload)});
+    $("#app-dialog").close();
+    await loadData(true);
+    renderApps();
+    toast(linkId ? "App bijgewerkt" : "App toegevoegd");
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#app-delete").addEventListener("click", async () => {
+  const linkId = $("#app-form").elements.link_id.value;
+  const link = (state.data.app_links || []).find(item => item.id === linkId);
+  if (!link || !confirm(`${link.name} verwijderen?`)) return;
+  try {
+    await api(`/api/app-links/${linkId}`, {method: "DELETE"});
+    $("#app-dialog").close();
+    await loadData(true);
+    renderApps();
+    toast("App verwijderd");
+  } catch (error) { toast(error.message, "error"); }
+});
 
 function openProvider(providerId) {
   const provider = state.data.providers.find(item => item.id === providerId);

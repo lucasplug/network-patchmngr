@@ -16,6 +16,7 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **DNS & reverse proxy** — handmatige A/AAAA/CNAME-records, read-only import van AdGuard Home-rewrites en Nginx Proxy Manager-hosts, inclusief koppeling aan bekende devices en services.
 - **Speedtest** — LibreSpeed CLI in de container, automatische historie en download/upload/ping permanent bovenin. Telemetry staat technisch uit.
 - **Meerdere omgevingen per bron** — twee Portainers, twee AdGuards: elke bron is een eigen instantie met eigen adres, inloggegevens en naam. Toevoegen via **Admin → + Databron**. De laatste van een soort kun je uitzetten maar niet verwijderen.
+- **Apps** — een eigen tabblad met snelkoppelingen naar je diensten, gegroepeerd, met per tegel de status uit Uptime Kuma. Alleen `http(s)`-links worden geaccepteerd.
 - **Licht en donker thema** — de knop rechtsboven wisselt; standaard volgt de app je systeeminstelling. De keuze is per browser, niet per installatie.
 - **Admin** — providerconfiguratie, handmatige synchronisatie, ongekoppelde discoveries, conflicten, DNS, proxyhosts, speedtestinstellingen en back-ups.
 - **Discoverybeheer** — discoveries negeren, archiveren, herstellen of samenvoegen met een bestaand device; providerrecords kunnen ook expliciet worden gekoppeld en ontkoppeld.
@@ -76,7 +77,7 @@ Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de UR
 
 | Provider | Inloggegevens in Admin | Opmerking |
 |---|---|---|
-| DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde `/24`-subnets; maximaal 1024 adressen per subnet |
+| DHCP/ARP | geen | Leest de ARP-tabel en pingt geconfigureerde subnetten (max. 1024 adressen elk). Twee ping-pakketten per adres tegen pakketverlies; wat binnen een gescand subnet niet antwoordt gaat op *down* |
 | Uptime Kuma | geen bij publieke statuspagina | Gebruikt statuspagina- en heartbeat-endpoints; de slug van de statuspagina hoort erbij |
 | Glances | gebruikersnaam en wachtwoord | Eén endpoint per machine, elk gekoppeld aan een device dat je zelf aanwijst |
 | Portainer | API-key | Gebruik een aparte gebruiker met minimale environmentrechten |

@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS entity_days (
   PRIMARY KEY(entity_id, day)
 );
 
+CREATE TABLE IF NOT EXISTS app_links (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  icon TEXT NOT NULL DEFAULT '',
+  group_name TEXT NOT NULL DEFAULT '',
+  -- Dezelfde constructie als bij netwerkapparaten: een app heeft geen eigen
+  -- status, maar leent die van de observatie die erover gaat -- in de praktijk
+  -- een Uptime Kuma-monitor.
+  monitor_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS providers (
   id TEXT PRIMARY KEY,
   -- Bewust niet uniek: je kunt twee Portainers of twee AdGuards hebben. De

@@ -185,7 +185,9 @@ def test_summary_is_lighter_than_bootstrap_but_has_the_live_bits() -> None:
         summary = client.get("/api/summary")
         assert summary.status_code == 200, summary.text
         payload = summary.json()
-        assert set(payload) == {"counts", "entities", "metrics", "providers", "speedtest"}
+        # app_links hoort er wél bij: het appdashboard moet zijn statusbolletjes
+        # kunnen bijwerken zonder een volledige bootstrap op te halen.
+        assert set(payload) == {"counts", "entities", "metrics", "providers", "speedtest", "app_links"}
         assert payload["counts"]["patched"] == 1
         assert any(item["id"] == entity_id for item in payload["entities"])
         # Geen inventaris, audit of topologie in de poll-payload.

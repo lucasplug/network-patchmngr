@@ -58,6 +58,7 @@
 
     <nav class="tabs" aria-label="Hoofdnavigatie">
       <button class="tab active" data-tab="patch"><span class="tab-icon">⌁</span>Patch</button>
+      <button class="tab" data-tab="apps"><span class="tab-icon">▦</span>Apps</button>
       <button class="tab" data-tab="topology"><span class="tab-icon">◇</span>Topologie</button>
       <button class="tab" data-tab="admin"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
     </nav>
@@ -81,6 +82,14 @@
       </div>
       <div class="section-bar with-space"><span>Handmatige devices</span><span class="muted" id="manual-entity-count"></span></div>
       <div id="manual-entities-list" class="data-list"></div>
+    </section>
+
+    <section id="apps-view" class="view">
+      <div class="view-heading">
+        <div><p class="eyebrow">Snelkoppelingen</p><h1>Apps</h1><p class="muted">Links naar je eigen diensten, met de status uit Uptime Kuma ernaast.</p></div>
+        <div class="heading-actions"><button class="button primary" id="new-app-button">+ App</button></div>
+      </div>
+      <div id="apps-grid" class="apps-grid"></div>
     </section>
 
     <section id="topology-view" class="view">
@@ -190,6 +199,19 @@
       <div id="provider-credentials" class="stack"></div>
       <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>
       <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="app-dialog" class="modal glass">
+    <form id="app-form" class="stack">
+      <div class="modal-head"><div><p class="eyebrow">Snelkoppeling</p><h2 id="app-dialog-title">App toevoegen</h2></div><button type="button" class="icon-button modal-close">×</button></div>
+      <input type="hidden" name="link_id">
+      <div class="field-row"><label>Naam<input name="name" required maxlength="80" placeholder="bijv. Portainer"></label><label>Icoon<input name="icon" maxlength="8" placeholder="bijv. 🐳"></label></div>
+      <label>Link<input name="url" required maxlength="500" placeholder="https://host:poort" inputmode="url"></label>
+      <label>Omschrijving<input name="description" maxlength="200" placeholder="optioneel"></label>
+      <div class="field-row"><label>Groep<input name="group_name" maxlength="60" placeholder="bijv. Beheer"></label><label>Volgorde<input name="position" type="number" min="0" max="999" value="0"></label></div>
+      <label>Status via<select name="monitor_entity_id" id="app-monitor-select"></select><small class="muted">Een Uptime Kuma-monitor of ander geobserveerd device. Zonder koppeling blijft de status onbekend.</small></label>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="app-delete">Verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
     </form>
   </dialog>
 

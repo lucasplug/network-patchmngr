@@ -16,6 +16,8 @@ issue-tracker — één regel per punt volstaat.
 | 8 | De glasvezel-ONT ontbreekt; die verzorgt het internet en gaat bedraad naar een Deco | Er was geen ONT-categorie, en erger: een kabel tússen twee netwerkapparaten werd niet in de topologie getekend. `trace_entity()` gaf `None` zodra een kabel op een poort eindigde in plaats van op een device | Categorie `ont` + geseed apparaat; `trace_far_port()` tekent apparaat-naar-apparaat als `trunk:`-relatie |
 | 9 | Er is een tweede Portainer en een tweede AdGuard | `providers.type` was `UNIQUE`: exact één bron per soort | Die beperking eruit, plus toevoegen/hernoemen/verwijderen van bronnen. De wizard leest nu de inventaris in plaats van een vaste lijst |
 | 10 | Graag een licht thema | De CSS had een tokenblok, maar 121 harde kleuren daarbuiten — waaronder donkere vlakken en lichte tekstkleuren | Alle overlays via `--tint`, vlakken en merkkleuren naar tokens; licht thema is nu één `[data-theme="light"]`-blok |
+| 11 | Een pagina zoals Homarr: links naar apps met status uit Uptime Kuma | Bestond niet | Tabblad **Apps** met tegels per groep; status via dezelfde monitorkoppeling als netwerkapparaten |
+| 12 | Kan de DHCP/ARP-scan beter? | Drie dingen: niets werd ooit op `down` gezet, de reverse lookups liepen serieel (200 apparaten x 2s > het pollinterval), en een enkel ping-pakket laat apparaten flapperen | `_mark_absent()` na een scan, parallelle lookups, `ping -c 2`, en een harde tijdslimiet op de sweep |
 
 ## Bijvangst bij deze punten
 
@@ -51,6 +53,14 @@ issue-tracker — één regel per punt volstaat.
 - **De laatste bron van een soort is niet te verwijderen.** Dan blijft de app
   zonder die adapter achter; uitzetten doet hetzelfde zonder de instellingen
   kwijt te raken.
+- **Alles was voor altijd 'up'.** De ARP-adapter meldde alleen wat hij vond;
+  een uitgezet apparaat viel hooguit terug op `unknown` als de observatie
+  verliep. Daarmee was de uptime-balk betekenisloos. Actief zoeken en niets
+  vinden is bewijs van `down`, maar alleen binnen de gescande subnetten --
+  daarbuiten hebben we niet gekeken. `last_seen_at` blijft staan: dat is
+  wanneer het ding er nog wel was.
+- **Een app-tegel is een `<a href>`.** Daarom accepteert de API alleen http(s):
+  `javascript:` in je eigen dashboard draait met je sessie erbij.
 - **Glances koppelt nu op endpoint in plaats van op hostnaam.** De sleutel van
   een providerrecord is `host:<entity_id>` geworden: verandert de hostnaam van
   een machine, dan blijft het dezelfde rij. Een afwijkende naam levert bij een
@@ -58,6 +68,7 @@ issue-tracker — één regel per punt volstaat.
 
 ## Schema gewijzigd
 
-Punt 3, 4, 7, 8 en 9 wijzigen `db.py` (`entities.uplink_device_id`,
-`physical_devices.monitor_entity_id`, `entity_id` per Glances-endpoint). Er is geen migratiepad: gooi het datavolume weg en begin
-opnieuw.
+Punt 3, 4, 7, 8, 9 en 11 wijzigen `db.py`: `entities.uplink_device_id`,
+`physical_devices.monitor_entity_id`, `entity_id` per Glances-endpoint, de
+`UNIQUE` van `providers.type` eraf, en de tabel `app_links`. Er is geen
+migratiepad: gooi het datavolume weg en begin opnieuw.

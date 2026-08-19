@@ -82,3 +82,19 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .spark-row{display:grid;grid-template-columns:34px 1fr 58px;align-items:center;gap:8px;font-size:9px;color:var(--dim)}.spark{width:100%;height:26px}.spark path{fill:none;stroke:var(--accent);stroke-width:1.6;vector-effect:non-scaling-stroke}.spark-value{text-align:right;font:500 10px var(--mono);color:var(--ink)}
 .link{cursor:pointer;border-bottom:1px dotted var(--line-bright)}.link:hover{color:var(--accent-2);border-color:var(--accent-2)}.legend-item[role=button]{cursor:pointer}.legend-item[role=button]:hover{color:var(--ink)}
 .zoom-controls{display:flex;align-items:center;gap:6px}.zoom-controls .icon-button{min-width:30px;min-height:30px}#zoom-level{min-width:38px;text-align:center;font:500 9px var(--mono)}.topo-figure{fill:var(--dim);font:500 10px var(--mono)}#topology-canvas.panning{cursor:grabbing}#topology-canvas{cursor:grab;touch-action:none}.topology-card.editing #topology-canvas{cursor:default}
+
+/* Apps: tegels met een statusbolletje. De hele kaart is een link; de
+   bewerkknop erin moet daarom zijn eigen klik afvangen. */
+.apps-grid{display:flex;flex-direction:column;gap:22px}
+.app-group{display:flex;flex-direction:column;gap:10px}
+.app-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.app-card{position:relative;display:flex;align-items:center;gap:12px;padding:14px 15px;border-radius:13px;text-decoration:none;color:inherit;transition:border-color .15s,transform .15s}
+.app-card:hover{border-color:var(--line-bright);transform:translateY(-1px)}
+.app-icon{display:grid;place-items:center;flex:0 0 38px;width:38px;height:38px;border-radius:10px;background:rgba(var(--accent-rgb),.12);color:var(--accent-ink);font-size:17px}
+.app-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.app-body strong{font-family:var(--sans);font-size:13px;font-weight:600}
+.app-body small{color:var(--dim);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-state{margin-left:auto;display:flex;align-items:center}
+.app-edit{position:absolute;top:6px;right:6px;width:24px;height:24px;opacity:0;transition:opacity .15s}
+.app-card:hover .app-edit,.app-edit:focus-visible{opacity:1}
+@media(max-width:640px){.app-cards{grid-template-columns:1fr}.app-edit{opacity:1}}

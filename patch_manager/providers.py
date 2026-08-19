@@ -25,6 +25,10 @@ MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 # Vlag ATF_COM in /proc/net/arp: het adres is echt opgelost. Staat hij niet aan,
 # dan is het een lege buur met MAC 00:00:00:00:00:00.
 ARP_FLAG_COMPLETE = 0x2
+# Hardgecodeerd met opzet: op een thuisnetwerk hoeft hier geen knop aan te
+# zitten. 48 gelijktijdige pings houdt een /22 binnen een minuut.
+PING_CONCURRENCY = 48
+SCAN_TIMEOUT_SECONDS = 180
 EMPTY_MAC = "00:00:00:00:00:00"
 
 
@@ -283,41 +287,63 @@ class ProviderManager:
 
         read_arp_table()
 
+        scanned: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
         if config.get("scan"):
+            semaphore = asyncio.Semaphore(PING_CONCURRENCY)
+
+            async def ping(ip: str) -> None:
+                async with semaphore:
+                    try:
+                        # Twee pakketten, niet één: op wifi raakt er geregeld
+                        # eentje kwijt, en met één probe zou dat apparaat als
+                        # down in de historie belanden. Alleen vlaggen die
+                        # overal bestaan; -i is niet op elke ping beschikbaar.
+                        process = await asyncio.create_subprocess_exec(
+                            "ping", "-c", "2", "-W", "1", ip,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        if await process.wait() == 0:
+                            found.setdefault(ip, {"ip": ip, "mac": ""})
+                    except FileNotFoundError:
+                        return
+
             for subnet_value in config.get("subnets", [])[:8]:
                 network = ipaddress.ip_network(subnet_value, strict=False)
                 if not self._network_is_trusted(network):
                     raise ValueError(f"Subnet {network} valt buiten PATCH_TRUSTED_SUBNETS")
                 if network.num_addresses > 1024:
                     raise ValueError(f"Subnet {network} bevat meer dan 1024 adressen")
-                semaphore = asyncio.Semaphore(48)
-
-                async def ping(ip: str) -> None:
-                    async with semaphore:
-                        try:
-                            process = await asyncio.create_subprocess_exec(
-                                "ping", "-c", "1", "-W", "1", ip,
-                                stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.DEVNULL,
-                            )
-                            if await process.wait() == 0:
-                                found.setdefault(ip, {"ip": ip, "mac": ""})
-                        except FileNotFoundError:
-                            return
-
-                await asyncio.gather(*(ping(str(ip)) for ip in network.hosts()))
+                # Een hangende ping mag de hele synchronisatie niet ophouden;
+                # wat binnen is, is binnen.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(ping(str(ip)) for ip in network.hosts())),
+                        timeout=SCAN_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    logger.warning("Scan van %s afgekapt na %ss", network, SCAN_TIMEOUT_SECONDS)
+                scanned.append(network)
             read_arp_table()
 
-        count = 0
-        for item in found.values():
-            if not self._address_is_trusted(item["ip"]):
-                continue
+        present = [item for item in found.values() if self._address_is_trusted(item["ip"])]
+
+        # Reverse lookups parallel: serieel is dit bij tweehonderd apparaten
+        # met een timeout van twee seconden al langer dan het pollinterval.
+        async def hostname_for(ip: str) -> str | None:
             try:
-                hostname = (await asyncio.wait_for(
-                    asyncio.to_thread(reverse_hostname, item["ip"]), timeout=2
-                ))
+                return await asyncio.wait_for(asyncio.to_thread(reverse_hostname, ip), timeout=2)
             except (TimeoutError, asyncio.TimeoutError):
-                hostname = None
+                return None
+
+        hostnames = dict(zip(
+            [item["ip"] for item in present],
+            await asyncio.gather(*(hostname_for(item["ip"]) for item in present)),
+        ))
+
+        count = 0
+        for item in present:
+            hostname = hostnames.get(item["ip"])
             await asyncio.to_thread(
                 self._store_record,
                 provider["id"],
@@ -332,7 +358,70 @@ class ProviderManager:
                 hostname=hostname,
             )
             count += 1
+
+        if scanned:
+            count += await asyncio.to_thread(
+                self._mark_absent, provider["id"], scanned, {item["ip"] for item in present}
+            )
         return count
+
+    def _mark_absent(
+        self,
+        provider_id: str,
+        scanned: list[Any],
+        present: set[str],
+    ) -> int:
+        """Zet apparaten die we actief zochten maar niet vonden op 'down'.
+
+        Zonder dit blijft alles voor altijd 'up': de adapter meldde alleen wat
+        hij vond. Een uitgezet apparaat viel daarna hooguit terug op 'unknown'
+        als de observatie verliep, en dat is te slap — we hebben gekeken en
+        niets gekregen, dat is bewijs. Alleen adressen binnen de gescande
+        subnetten tellen mee; buiten dat bereik weten we niets.
+        """
+        rows = self.database.fetch_all(
+            """SELECT e.id,e.ip_address FROM entities e
+               JOIN provider_records pr ON pr.entity_id=e.id
+               WHERE pr.provider_id=? AND e.ip_address IS NOT NULL
+                 AND e.status!='down' AND e.archived=0""",
+            (provider_id,),
+        )
+        absent = []
+        for row in rows:
+            if row["ip_address"] in present:
+                continue
+            try:
+                address = ipaddress.ip_address(row["ip_address"])
+            except ValueError:
+                continue
+            if any(address in network for network in scanned):
+                absent.append(row["id"])
+        if not absent:
+            return 0
+        now = utcnow()
+        provider_row = self.database.fetch_one(
+            "SELECT poll_interval_seconds FROM providers WHERE id=?", (provider_id,)
+        )
+        ttl = max(300, int(provider_row["poll_interval_seconds"]) * 3 if provider_row else 600)
+        expires = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat(timespec="seconds")
+        with self.database.transaction() as connection:
+            for entity_id in absent:
+                # last_seen_at blijft staan: dat is wanneer het ding er nog wél
+                # was, en die betekenis wil je niet kwijt.
+                connection.execute(
+                    "UPDATE entities SET status='down',status_updated_at=?,updated_at=? WHERE id=?",
+                    (now, now, entity_id),
+                )
+                connection.execute(
+                    "DELETE FROM observations WHERE entity_id=? AND provider_id=? AND field='status'",
+                    (entity_id, provider_id),
+                )
+                connection.execute(
+                    """INSERT INTO observations(id,entity_id,provider_id,field,value_json,observed_at,expires_at,confidence)
+                       VALUES(?,?,?,'status',?,?,?,1.0)""",
+                    (str(uuid.uuid4()), entity_id, provider_id, json.dumps("down"), now, expires),
+                )
+        return len(absent)
 
     async def _sync_uptime_kuma(self, provider: dict[str, Any], config: dict[str, Any]) -> int:
         base_url = str(config.get("base_url", "")).rstrip("/")
