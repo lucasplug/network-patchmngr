@@ -111,9 +111,11 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .search-sub{grid-column:2;grid-row:2;color:var(--dim);font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Recente veranderingen. */
-.pill{padding:3px 8px;border-radius:20px;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
-.pill.new{background:rgba(var(--up-rgb),.14);color:var(--up)}
-.pill.gone{background:rgba(var(--down-rgb),.14);color:var(--down-ink)}
+/* Eigen naam: .pill bestond al voor de 'draagbaar'-badge bij back-ups, en die
+   werd door een tweede definitie stilletjes rond en in hoofdletters. */
+.change-pill{padding:3px 8px;border-radius:20px;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.change-pill.new{background:rgba(var(--up-rgb),.14);color:var(--up)}
+.change-pill.gone{background:rgba(var(--down-rgb),.14);color:var(--down-ink)}
 #changes-days{padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--dim);font-size:10px}
 
 /* Een kaart oplichten na een zoektreffer. */
@@ -135,3 +137,52 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 
 .status-button{padding:0;border:0;background:none;cursor:pointer;line-height:0}
 .status-button:hover .status-dot{box-shadow:0 0 0 3px rgba(var(--tint),.12)}
+
+.pending-link{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid rgba(var(--accent-rgb),.45);border-radius:8px;background:rgba(var(--accent-rgb),.1);color:var(--ink);font-size:11px}
+
+/* Op een smal telefoonscherm paste de kop niet in beeld: titel + snelheidsindicator +
+   zoekveld + knoppen samen samen breder dan het scherm, waardoor de hele pagina
+   meeschuiven. De snelheidsindicator staat ook in het topologie-tabblad, dus
+   die mag hier weg; het zoekveld krimpt mee. */
+@media(max-width:600px){
+  .speed-indicator{display:none}
+  .search-box input,.search-box input:focus{width:112px}
+  .brand{font-size:18px}
+  .top-actions{gap:7px}
+}
+
+/* Duidelijke, toetsenbordbereikbare topologie-acties en één herkenbare
+   bevestigingsstijl voor destructieve handelingen. */
+.confirmation-message{margin:0;white-space:pre-line;line-height:1.65;color:var(--dim)}
+#confirmation-input-wrap span{display:block;margin-bottom:7px}
+.topo-node:focus-visible{outline:none}
+.topo-node:focus-visible .topo-rect,.topo-node:focus-visible .topo-group{stroke:var(--accent);stroke-width:3;filter:drop-shadow(0 0 7px rgba(var(--accent-rgb),.32))}
+.relation-hit.manual{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke}
+.editing .relation-hit.manual{stroke-width:14}
+.relation-hit.manual:focus-visible{outline:none;stroke:rgba(var(--accent-rgb),.5);stroke-width:7}
+.edge-label{pointer-events:none}
+
+/* Alle hoofdschermen blijven binnen het toestel; alleen de topologie zelf
+   scrolt horizontaal omdat de kaart op ware schaal leesbaar moet blijven. */
+@media(max-width:600px){
+  html,body{max-width:100%;overflow-x:clip}
+  .app-shell,.view,.admin-grid,.admin-main,.admin-side,.providers-grid,.physical-grid,.patch-layout,.topology-card,.topology-scroll,.data-list{min-width:0;max-width:100%}
+  .topbar{display:grid;grid-template-columns:minmax(0,1fr);height:auto;min-height:104px;padding:11px 0;gap:8px}
+  .top-actions{width:100%;min-width:0;justify-content:space-between}
+  .search-box{flex:1;min-width:0}
+  .search-box input,.search-box input:focus{width:100%}
+  .tabs{gap:0;justify-content:space-between}
+  .tab{gap:4px;padding-inline:4px}
+  .tab-icon{font-size:14px}
+  .admin-side{grid-template-columns:minmax(0,1fr)}
+  .data-row,.entity-row,.discovery-row,.mapping-row,.audit-row,.dns-row,.proxy-row{grid-template-columns:minmax(0,1fr)}
+  .data-row>*{min-width:0}
+  .data-row>:nth-child(2),.data-row>:nth-child(3){display:block}
+  .row-actions,.provider-actions{flex-wrap:wrap}
+  .heading-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .topology-actions{width:100%;align-items:flex-start;gap:10px}
+  .topology-toolbar{align-items:flex-start;gap:10px;flex-direction:column;padding-block:10px}
+  .layer-controls{max-width:100%}
+  .topology-scroll{width:100%;overflow:auto}
+  .modal-actions{flex-wrap:wrap}
+}

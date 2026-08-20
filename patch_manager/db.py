@@ -393,15 +393,23 @@ def _migration_002(connection: sqlite3.Connection) -> None:
         for row in connection.execute("PRAGMA index_list(providers)")
     )
     if unique_type:
-        connection.execute("ALTER TABLE providers RENAME TO providers_old")
-        connection.executescript(PROVIDERS_TABLE)
+        # Niet hernoemen-en-terugzetten: SQLite herschrijft bij een RENAME de
+        # foreign keys van provider_secrets, provider_records, observations en
+        # conflicts mee naar de oude naam, en DROP TABLE veegt hun rijen dan
+        # via ON DELETE CASCADE weg. De gedocumenteerde route bouwt de nieuwe
+        # tabel onder een eigen naam op; naar `providers_new` verwijst niets,
+        # dus het hernoemen daarvan raakt geen enkele andere tabel.
         connection.execute(
-            """INSERT INTO providers(id,type,name,enabled,poll_interval_seconds,config_json,
-                                     last_run_at,last_success_at,last_error,updated_at)
-               SELECT id,type,name,enabled,poll_interval_seconds,config_json,
-                      last_run_at,last_success_at,last_error,updated_at FROM providers_old"""
+            PROVIDERS_TABLE.replace("IF NOT EXISTS providers", "providers_new").strip().rstrip(";")
         )
-        connection.execute("DROP TABLE providers_old")
+        connection.execute(
+            """INSERT INTO providers_new(id,type,name,enabled,poll_interval_seconds,config_json,
+                                         last_run_at,last_success_at,last_error,updated_at)
+               SELECT id,type,name,enabled,poll_interval_seconds,config_json,
+                      last_run_at,last_success_at,last_error,updated_at FROM providers"""
+        )
+        connection.execute("DROP TABLE providers")
+        connection.execute("ALTER TABLE providers_new RENAME TO providers")
 
     # De inventarisseed draait alleen bij een lege installatie, dus een
     # bestaande database krijgt de ONT hier.
@@ -471,12 +479,8 @@ class Database:
             connection.close()
 
     def initialize(self) -> None:
+        self._apply_schema_and_migrations()
         with self.transaction() as connection:
-            fresh = connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-            ).fetchone()[0] == 0
-            connection.executescript(SCHEMA)
-            self._migrate(connection, fresh)
             inventory_seeded = connection.execute(
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()
@@ -499,6 +503,54 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO app_meta(key,value) VALUES('app_title','Network Patch Manager')"
             )
+
+    def _apply_schema_and_migrations(self) -> None:
+        """Schema aanmaken en de database naar SCHEMA_VERSION brengen.
+
+        Dit gebeurt op een eigen verbinding met autocommit, omdat een migratie
+        een tabel kan moeten herbouwen. Daarvoor moet `foreign_keys` uit, en die
+        pragma is een no-op zolang er een transactie loopt. Wat er wél omheen
+        zit is een expliciete BEGIN, plus een `foreign_key_check` achteraf: een
+        halve migratie is erger dan geen.
+        """
+        connection = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.isolation_level = None
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            fresh = connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0] == 0
+            # Een database van een nieuwere versie herkennen vóórdat we iets
+            # aanraken. Anders zou `executescript(SCHEMA)` er eerst tabellen bij
+            # zetten en pas daarna weigeren, en dan klopt de belofte "raakt een
+            # nieuwere database niet aan" niet meer.
+            if not fresh:
+                existing_version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if existing_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"Database is van een nieuwere versie ({existing_version}) dan deze app "
+                        f"({SCHEMA_VERSION}); start de vorige image of zet een back-up terug."
+                    )
+            # SCHEMA zet zelf foreign_keys=ON; daarna staan we weer buiten een
+            # transactie, dus pas hier kan de pragma uit.
+            connection.executescript(SCHEMA)
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._migrate(connection, fresh)
+                broken = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if broken:
+                    raise RuntimeError(
+                        f"Migratie liet kapotte verwijzingen achter: {[tuple(row) for row in broken[:3]]}"
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("PRAGMA foreign_keys=ON")
+        finally:
+            connection.close()
 
     def _migrate(self, connection: sqlite3.Connection, fresh: bool) -> None:
         """Breng een bestaande database naar de huidige SCHEMA_VERSION.
@@ -812,22 +864,60 @@ class Database:
             return False
         if secret_key_path is None:
             raise RuntimeError("Voor dit back-uppakket is een sleutelpad vereist")
-        with zipfile.ZipFile(source_path) as archive, tempfile.TemporaryDirectory(
-            prefix="patch-manager-restore-", dir=source_path.parent
-        ) as temporary:
-            database_copy = Path(temporary) / "database.db"
-            with archive.open("database.db") as source, database_copy.open("wb") as destination:
-                shutil.copyfileobj(source, destination, length=1024 * 1024)
-            secret_key_path.parent.mkdir(parents=True, exist_ok=True)
-            key_copy = secret_key_path.with_name(f".{secret_key_path.name}.{uuid.uuid4().hex}.tmp")
-            try:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        secret_key_path.parent.mkdir(parents=True, exist_ok=True)
+        suffix = uuid.uuid4().hex
+        database_copy = self.path.with_name(f".{self.path.name}.{suffix}.restore")
+        database_rollback = self.path.with_name(f".{self.path.name}.{suffix}.rollback")
+        key_copy = secret_key_path.with_name(f".{secret_key_path.name}.{suffix}.restore")
+        key_rollback = secret_key_path.with_name(f".{secret_key_path.name}.{suffix}.rollback")
+        had_database = self.path.is_file()
+        had_key = secret_key_path.is_file()
+        database_replaced = key_replaced = False
+        try:
+            with zipfile.ZipFile(source_path) as archive:
+                with archive.open("database.db") as source, database_copy.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
                 key_copy.write_bytes(archive.read("provider-secrets.key").strip() + b"\n")
-                os.chmod(key_copy, 0o600)
-                self._restore_sqlite(database_copy)
+            os.chmod(key_copy, 0o600)
+
+            # Migreer en initialiseer eerst de kopie. De actieve database en
+            # sleutel blijven tot hier byte-voor-byte ongemoeid.
+            Database(database_copy).initialize()
+            self._validate_sqlite(database_copy)
+            if had_database:
+                shutil.copy2(self.path, database_rollback)
+            if had_key:
+                shutil.copy2(secret_key_path, key_rollback)
+
+            try:
+                os.replace(database_copy, self.path)
+                database_replaced = True
                 os.replace(key_copy, secret_key_path)
+                key_replaced = True
                 os.chmod(secret_key_path, 0o600)
-            finally:
-                key_copy.unlink(missing_ok=True)
+                self.initialize()
+            except Exception:
+                # Twee bestanden kunnen niet met één POSIX-rename worden
+                # gewisseld. Daarom houden we van beide een rollbackkopie en
+                # herstellen we de oorspronkelijke combinatie voordat de fout
+                # de API verlaat.
+                if database_replaced:
+                    if had_database:
+                        os.replace(database_rollback, self.path)
+                    else:
+                        self.path.unlink(missing_ok=True)
+                if key_replaced:
+                    if had_key:
+                        os.replace(key_rollback, secret_key_path)
+                    else:
+                        secret_key_path.unlink(missing_ok=True)
+                if had_database:
+                    self.initialize()
+                raise
+        finally:
+            for temporary_path in (database_copy, database_rollback, key_copy, key_rollback):
+                temporary_path.unlink(missing_ok=True)
         return True
 
     @staticmethod

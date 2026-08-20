@@ -47,6 +47,27 @@ CREATE TABLE providers (id TEXT PRIMARY KEY, type TEXT NOT NULL UNIQUE, name TEX
   enabled INTEGER NOT NULL DEFAULT 0, poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
   config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_success_at TEXT,
   last_error TEXT, updated_at TEXT NOT NULL);
+-- Deze vier verwijzen naar providers en maken de herbouw gevaarlijk: bij een
+-- RENAME schrijft SQLite hun foreign keys mee, waarna DROP TABLE hun rijen
+-- cascadeert. Ze horen dus in deze test, anders bewijst hij niets.
+CREATE TABLE provider_secrets (provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+  encrypted_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE provider_records (id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  external_id TEXT NOT NULL, entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL, raw_json TEXT NOT NULL, first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL, UNIQUE(provider_id, external_id));
+CREATE TABLE observations (id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  field TEXT NOT NULL, value_json TEXT NOT NULL, observed_at TEXT NOT NULL,
+  expires_at TEXT, confidence REAL NOT NULL DEFAULT 1.0);
+CREATE TABLE conflicts (id TEXT PRIMARY KEY,
+  entity_id TEXT REFERENCES entities(id) ON DELETE CASCADE,
+  provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,
+  field TEXT NOT NULL, manual_value TEXT, observed_value TEXT,
+  status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,
+  resolved_at TEXT, resolution TEXT);
 """
 
 
@@ -83,6 +104,22 @@ def legacy(tmp_path: Path) -> Path:
     connection.execute(
         "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,'lucas','x',?)",
         (str(uuid.uuid4()), now),
+    )
+    # Versleutelde inloggegevens en providerkoppelingen: het duurst om kwijt te
+    # raken, want die moet je allemaal opnieuw invoeren.
+    connection.execute(
+        "INSERT INTO provider_secrets(provider_id,encrypted_json,updated_at) VALUES('portainer','VERSLEUTELD-GEHEIM',?)",
+        (now,),
+    )
+    connection.execute(
+        """INSERT INTO provider_records(id,provider_id,external_id,entity_id,kind,raw_json,first_seen_at,last_seen_at)
+           VALUES(?,'portainer','endpoint:1',?,'docker_host','{}',?,?)""",
+        (str(uuid.uuid4()), entity_id, now, now),
+    )
+    connection.execute(
+        """INSERT INTO observations(id,entity_id,provider_id,field,value_json,observed_at)
+           VALUES(?,?,'portainer','status','"up"',?)""",
+        (str(uuid.uuid4()), entity_id, now),
     )
     connection.commit()
     connection.close()
@@ -161,3 +198,42 @@ def test_a_newer_database_is_refused_instead_of_damaged(tmp_path: Path) -> None:
     connection.close()
     with pytest.raises(RuntimeError, match="nieuwere versie"):
         Database(path).initialize()
+
+
+def test_rebuilding_providers_keeps_everything_that_points_at_it(legacy: Path) -> None:
+    """De duurste fout die deze migratie kon maken.
+
+    SQLite schrijft bij een tabelhernoeming de foreign keys van andere tabellen
+    mee. Gebeurt dat, dan wijst provider_secrets naar een tabel die daarna wordt
+    weggegooid, en cascadeert dat je versleutelde inloggegevens weg.
+    """
+    Database(legacy).initialize()
+
+    assert read(legacy, "SELECT provider_id,encrypted_json FROM provider_secrets") == [
+        ("portainer", "VERSLEUTELD-GEHEIM")
+    ], "de versleutelde inloggegevens zijn verdwenen"
+    assert len(read(legacy, "SELECT id FROM provider_records")) == 1
+    assert len(read(legacy, "SELECT id FROM observations")) == 1
+
+    # En de verwijzingen wijzen nog naar `providers`, niet naar een restnaam.
+    for table in ("provider_secrets", "provider_records", "observations", "conflicts"):
+        sql = read(legacy, f"SELECT sql FROM sqlite_master WHERE name='{table}'")[0][0]
+        assert "providers_old" not in sql and "providers_new" not in sql, f"{table} verwijst naar een restnaam"
+
+    assert read(legacy, "PRAGMA foreign_key_check") == [], "kapotte verwijzingen na de migratie"
+
+
+def test_a_failing_migration_leaves_the_database_untouched(legacy: Path, monkeypatch) -> None:
+    """Een halve migratie is erger dan geen."""
+    import patch_manager.db as db_module
+
+    def explode(connection):
+        connection.execute("DELETE FROM provider_secrets")
+        raise RuntimeError("migratie klapt halverwege")
+
+    monkeypatch.setitem(db_module.MIGRATIONS, 2, explode)
+    with pytest.raises(RuntimeError, match="klapt halverwege"):
+        Database(legacy).initialize()
+
+    assert read(legacy, "SELECT provider_id FROM provider_secrets") == [("portainer",)]
+    assert read(legacy, "PRAGMA user_version") == [(0,)], "versie opgehoogd terwijl de migratie faalde"

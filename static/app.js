@@ -44,6 +44,28 @@ function toast(message, type = "success") {
   setTimeout(() => item.remove(), 4200);
 }
 
+function confirmAction({title="Actie bevestigen",message,confirmLabel="Bevestigen",expectedText=""}) {
+  const dialog=$("#confirmation-dialog"),input=$("#confirmation-input"),inputWrap=$("#confirmation-input-wrap"),accept=$("#confirmation-accept");
+  if(dialog.open)dialog.close("cancel");
+  $("#confirmation-title").textContent=title;
+  $("#confirmation-message").textContent=message;
+  accept.textContent=confirmLabel;
+  input.value="";
+  inputWrap.classList.toggle("hidden",!expectedText);
+  $("#confirmation-input-label").textContent=expectedText?`Typ “${expectedText}” om te bevestigen.`:"";
+  accept.disabled=Boolean(expectedText);
+  input.oninput=()=>{accept.disabled=input.value!==expectedText;};
+  dialog.returnValue="cancel";
+  return new Promise(resolve=>{
+    dialog.addEventListener("close",()=>{
+      input.oninput=null;
+      resolve(dialog.returnValue==="confirm"&&(!expectedText||input.value===expectedText));
+    },{once:true});
+    dialog.showModal();
+    if(expectedText)input.focus();
+  });
+}
+
 async function initialize() {
   try {
     applyBranding(await api("/api/public/settings"));
@@ -135,7 +157,9 @@ function renderAll() {
   renderApps();
   renderTopology();
   renderAdmin();
-  renderChanges();
+  // Alleen ophalen als het paneel ook zichtbaar is: dit draait ook op de
+  // poll van elke 30 seconden, en dan is het een verzoek om niets.
+  if (state.activeTab === "admin") renderChanges();
   renderSpeedtest();
 }
 
@@ -186,7 +210,7 @@ function deviceFace(device) {
         <div><div class="device-title">${device.monitor_entity_id
           ? `<button class="status-button" data-device-history="${esc(device.id)}" title="Uptime van ${esc(device.monitor_name || "de monitor")}">${statusDot(device.status)}</button>`
           : statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
-        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
+        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken" aria-label="${esc(device.name)} bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
       </header>
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
       ${rears.length ? `<div class="front-label">achterzijde</div><div class="device-front rear">${rears.map(port => portFace(port, device)).join("")}</div>` : ""}
@@ -218,6 +242,13 @@ function renderUnpatched() {
     !linked.has(entity.id) && !entity.archived && canAttach(entity.type)
     && !entity.uplink_device_id && !placed.has(entity.id));
   $("#unpatched-count").textContent = `${free.length} vrij`;
+  // Een lopende "kies een poort"-actie hoort zichtbaar en opzegbaar te zijn.
+  // Eerder verdween hij stil zodra je de lade sloot zonder op te slaan.
+  const pending = state.pendingEntityId && state.data.entities.find(item => item.id === state.pendingEntityId);
+  $("#pending-link").innerHTML = pending
+    ? `Kies een poort voor <strong>${esc(pending.name)}</strong> <button class="button micro" id="cancel-pending">Annuleren</button>`
+    : "";
+  $("#pending-link").classList.toggle("hidden", !pending);
   $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
     <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
       ${statusDot(entity.status)}<span>${esc(entity.name)}</span><small>${esc(entity.vendor || entity.ip_address || categoryLabel(entity.type))}</small>
@@ -231,15 +262,19 @@ let dragPayload = null;
 
 // Een poort overschrijven gooit de bestaande kabel weg (label, kleur, notities).
 // Bij slepen is dat niet zichtbaar, dus daar vragen we het eerst.
-function confirmOverwrite(portId) {
+async function confirmOverwrite(portId) {
   const port = findPort(portId);
   if (!port || !port.cable_id) return true;
   const occupant = port.link_kind === "port" ? (port.target_port_label || "een andere poort") : (port.entity_name || "een device");
-  return confirm(`Deze poort is al bezet door ${occupant}${port.cable_label ? ` (kabel ${port.cable_label})` : ""}.\n\nDie kabel wordt losgekoppeld. Doorgaan?`);
+  return confirmAction({
+    title: "Bezette poort vervangen?",
+    message: `Deze poort is al bezet door ${occupant}${port.cable_label ? ` (kabel ${port.cable_label})` : ""}.\n\nDie kabel wordt losgekoppeld.`,
+    confirmLabel: "Kabel vervangen",
+  });
 }
 
 async function linkEntityToPort(entityId, portId, {ask = true} = {}) {
-  if (ask && !confirmOverwrite(portId)) return;
+  if (ask && !(await confirmOverwrite(portId))) return;
   const previous = findPortByEntity(entityId);
   try {
     await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method: "PUT", body: JSON.stringify({b_entity_id: entityId})});
@@ -259,18 +294,12 @@ function cablePayload(port) {
 async function moveCable(fromPortId, toPortId) {
   const port = findPort(fromPortId);
   if (!port || !port.cable_id) return;
-  if (!confirmOverwrite(toPortId)) return;
-  const payload = cablePayload(port);
+  if (!(await confirmOverwrite(toPortId))) return;
+  const payload = {...cablePayload(port), move_cable_id: port.cable_id};
   try {
-    await api(`/api/ports/${encodeURIComponent(fromPortId)}/cable`, {method: "DELETE"});
-    try {
-      await api(`/api/ports/${encodeURIComponent(toPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
-    } catch (error) {
-      // De oude kabel is al weg; zet hem terug zodat een mislukte verplaatsing
-      // nooit administratie kost.
-      await api(`/api/ports/${encodeURIComponent(fromPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
-      throw error;
-    }
+    // De server verwijdert de oude koppeling en schrijft de nieuwe in één
+    // transactie. Een mislukking kan daardoor nooit een kabel laten verdwijnen.
+    await api(`/api/ports/${encodeURIComponent(toPortId)}/cable`, {method: "PUT", body: JSON.stringify(payload)});
     await loadData(true);
     toast("Kabel verplaatst");
   } catch (error) { toast(error.message, "error"); await loadData(true); }
@@ -305,7 +334,13 @@ function renderTopology() {
   const svg = $("#topology-canvas");
   const nodes = state.data.topology?.nodes || [];
   const relations = state.data.topology?.relations || [];
-  const visible = nodes.filter(node => !node.hidden);
+  // Verborgen knopen komen mee uit de backend; de laag bepaalt of je ze ziet.
+  // Anders zou verbergen een deur zijn die alleen dichtgaat.
+  const showHidden = $('[data-layer="hidden"]').checked;
+  const hiddenCount = nodes.filter(node => node.hidden).length;
+  $("#hidden-count").textContent = hiddenCount;
+  $("#hidden-count").classList.toggle("hidden", hiddenCount === 0);
+  const visible = nodes.filter(node => showHidden || !node.hidden);
   const byId = new Map(visible.map(node => [node.id, node]));
   const children = new Map();
   visible.forEach(node => {
@@ -339,7 +374,15 @@ function renderTopology() {
     // in één oogopslag ziet dat er geen poort achter zit.
     const portless = relation.relation_type === "wireless" || relation.relation_type === "portless";
     const cls = `${relation.source === "patch" ? "edge-physical" : service ? "edge-service" : "edge-virtual"}${portless ? " edge-portless" : ""}`;
-    edgeMarkup += `<path class="${cls} relation-hit ${relation.source==='manual'?'manual':''}" data-relation-id="${esc(relation.id)}" d="M${x1} ${y1} C${x1} ${(y1+y2)/2},${x2} ${(y1+y2)/2},${x2} ${y2}"/>`;
+    const fromLabel=byId.get(relation.from_node_id)?.label||"onbekende node",toLabel=byId.get(relation.to_node_id)?.label||"onbekende node";
+    const path=`M${x1} ${y1} C${x1} ${(y1+y2)/2},${x2} ${(y1+y2)/2},${x2} ${y2}`;
+    edgeMarkup += `<path class="${cls}" d="${path}"/>`;
+    if(relation.source==="manual"){
+      const relationInteraction=state.editingTopology
+        ? ` role="button" tabindex="0" aria-label="Handmatige relatie van ${esc(fromLabel)} naar ${esc(toLabel)} beheren"`
+        : "";
+      edgeMarkup += `<path class="relation-hit manual" data-relation-id="${esc(relation.id)}"${relationInteraction} d="${path}"/>`;
+    }
     if (relation.label) labelMarkup += `<text class="edge-label" x="${(x1+x2)/2+5}" y="${(y1+y2)/2-4}">${esc(shorten(relation.label,24))}</text>`;
   });
   const extent = [...positions.values()].reduce((acc,p) => ({x:Math.max(acc.x,p.x+p.width+50),y:Math.max(acc.y,p.y+p.height+60)}), {x:1200,y:760});
@@ -378,7 +421,8 @@ function autoTopologyLayout(nodes, children) {
 
 function topoGroup(node, p) {
   const status=node.status||"unknown";
-  return `<g class="topo-node topo-container lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}" transform="translate(${p.x} ${p.y})">
+  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)} bewerken"`:"";
+  return `<g class="topo-node topo-container lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}"${interaction} transform="translate(${p.x} ${p.y})">
     <rect class="topo-group" width="${p.width}" height="${p.height}" rx="16"/>
     <text class="topo-group-title" x="18" y="25">${esc(shorten(node.label,38))}</text>
     <text class="topo-sub" x="18" y="42">${esc(shorten(node.subtitle||node.node_type,48))}</text>
@@ -391,7 +435,8 @@ function topoNode(node, p) {
   const color = colors[node.status] || colors.unknown, metrics=node.metrics||{};
   const cpu=metrics.cpu_percent!==undefined&&metrics.cpu_percent!==null?Math.max(0,Math.min(100,Number(metrics.cpu_percent))):null;
   const figure = keyFigure(node, metrics);
-  return `<g class="topo-node lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}" transform="translate(${p.x} ${p.y})">
+  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)} bewerken"`:"";
+  return `<g class="topo-node lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}"${interaction} transform="translate(${p.x} ${p.y})">
     <rect class="topo-rect" width="${p.width}" height="${p.height}" rx="10"/>
     <text class="topo-title" x="12" y="22">${esc(shorten(node.label, 23))}</text>
     <text class="topo-sub" x="12" y="41">${esc(shorten(node.subtitle, 27))}</text>
@@ -445,13 +490,23 @@ function renderAdmin() {
   $("#conflicts-list").innerHTML = openConflicts.length ? openConflicts.map(conflict => `<div class="mini-item"><strong>${esc(conflict.entity_name || "Onbekend device")} · ${esc(conflict.field)}</strong><p>Handmatig: ${esc(conflict.manual_value)}<br>${esc(conflict.provider_name)}: ${esc(conflict.observed_value)}</p><button class="button" data-resolve-conflict="${conflict.id}">Handmatig behouden</button></div>`).join("") : `<div class="empty-state">Geen open conflicten.</div>`;
   $("#backups-list").innerHTML = state.data.backups.length ? state.data.backups.slice(0,8).map(backup => `<div class="mini-item"><strong>${esc(backup.name)}</strong>${backup.portable ? ' <span class="pill">draagbaar</span>' : ""}<p>${formatTime(backup.created_at)} · ${formatBytes(backup.size)}</p><div class="row-actions"><a class="button" href="/api/backups/${encodeURIComponent(backup.name)}/download">Download</a><button class="button danger" data-backup-restore="${esc(backup.name)}">Herstel</button></div></div>`).join("") : `<div class="empty-state">Nog geen back-up gemaakt.</div>`;
   const entityNames=new Map(state.data.entities.map(entity=>[entity.id,entity.name]));
-  $("#dns-list").innerHTML = state.data.dns_records.length ? state.data.dns_records.map(record=>`<div class="data-row dns-row"><div class="data-main"><span class="data-icon">DNS</span><div><strong>${esc(record.name)}</strong><span>${esc(record.source)}${record.entity_id?` · ${esc(entityNames.get(record.entity_id)||"device")}`:""}</span></div></div><div><span class="data-cell-label">Type</span><br>${esc(record.record_type)}</div><div><span class="data-cell-label">Waarde</span><br>${esc(record.value)}</div>${record.source==="manual"?`<div class="row-actions"><button class="button" data-dns-edit="${record.id}">Wijzig</button><button class="button danger" data-dns-delete="${record.id}">×</button></div>`:`<span class="pill">read-only</span>`}</div>`).join("") : `<div class="empty-state">Nog geen DNS-records. Voeg er één toe of synchroniseer AdGuard Home.</div>`;
+  $("#dns-list").innerHTML = state.data.dns_records.length ? state.data.dns_records.map(record=>`<div class="data-row dns-row"><div class="data-main"><span class="data-icon">DNS</span><div><strong>${esc(record.name)}</strong><span>${esc(record.source)}${record.entity_id?` · ${esc(entityNames.get(record.entity_id)||"device")}`:""}</span></div></div><div><span class="data-cell-label">Type</span><br>${esc(record.record_type)}</div><div><span class="data-cell-label">Waarde</span><br>${esc(record.value)}</div>${record.source==="manual"?`<div class="row-actions"><button class="button" data-dns-edit="${record.id}">Wijzig</button><button class="button danger" data-dns-delete="${record.id}" aria-label="${esc(record.name)} verwijderen">Verwijder</button></div>`:`<span class="pill">read-only</span>`}</div>`).join("") : `<div class="empty-state">Nog geen DNS-records. Voeg er één toe of synchroniseer AdGuard Home.</div>`;
   $("#proxy-count").textContent=`${state.data.proxy_hosts.length} hosts`;
   $("#proxy-list").innerHTML = state.data.proxy_hosts.length ? state.data.proxy_hosts.map(host=>`<div class="data-row proxy-row"><div class="data-main"><span class="data-icon">↗</span><div><strong>${esc((host.domains||[]).join(", ")||"Naamloos")}</strong><span>Nginx Proxy Manager · read-only</span></div></div><div><span class="data-cell-label">Doel</span><br>${esc(host.forward_scheme)}://${esc(host.forward_host)}:${host.forward_port||"—"}</div><div><span class="data-cell-label">Status</span><br>${statusDot(host.enabled?"up":"down")} ${host.enabled?"actief":"uit"}</div><span class="pill">${esc(entityNames.get(host.entity_id)||"niet gekoppeld")}</span></div>`).join("") : `<div class="empty-state">Nog geen proxyhosts. Configureer en synchroniseer Nginx Proxy Manager.</div>`;
   $("#audit-list").innerHTML=(state.data.audit_log||[]).length?state.data.audit_log.map(item=>`<div class="data-row audit-row"><div class="data-main"><span class="data-icon">⌁</span><div><strong>${esc(item.action)}</strong><span>${esc(item.username||"systeem")} · ${esc(item.target_type)}</span></div></div><div>${esc(item.target_id||"—")}</div><div>${formatTime(item.created_at)}</div></div>`).join(""):`<div class="empty-state">Nog geen beheeracties.</div>`;
 }
 
 function providerIcon(type) { return ({dhcp_arp:"⌁",uptime_kuma:"◉",glances:"▥",portainer:"⬡",proxmox:"◇",adguard:"DNS",nginx_proxy_manager:"↗"})[type] || "·"; }
+
+function formatInterval(seconds) {
+  const value=Number(seconds)||21600;
+  if(value<3600)return `Elke ${Math.round(value/60)} minuten`;
+  if(value===3600)return "Elk uur";
+  if(value<86400)return `Elke ${Math.round(value/3600)} uur`;
+  if(value===86400)return "Dagelijks";
+  if(value===604800)return "Wekelijks";
+  return `Elke ${Math.round(value/86400)} dagen`;
+}
 
 // Categorieën komen uit de backend (patch_manager/categories.py), zodat de
 // rollen hier niet opnieuw worden verzonnen. Providers kunnen een type
@@ -477,15 +532,17 @@ function renderSpeedtest() {
   [["down","download_mbps"],["up","upload_mbps"],["ping","ping_ms"],["jitter","jitter_ms"]].forEach(([id,key])=>$("#speed-detail-"+id).textContent=latest?fmt(latest[key]):"—");
   const history=(speed.history||[]).slice(0,24).reverse(), max=Math.max(1,...history.map(item=>Number(item.download_mbps)||0));
   $("#speed-chart").innerHTML=history.length?history.map(item=>`<div class="speed-bar-wrap" title="${esc(formatTime(item.completed_at))}: ↓ ${fmt(item.download_mbps)} / ↑ ${fmt(item.upload_mbps)} Mbps"><i class="speed-bar" style="height:${Math.max(3,(Number(item.download_mbps)||0)/max*100)}%"></i></div>`).join(""):`<div class="empty-state">Na de eerste test verschijnt hier de historie.</div>`;
-  $("#speed-settings-summary").innerHTML=`<div class="mini-item"><strong>${settings.enabled?"Automatisch actief":"Automatisch uit"}</strong><p>Elke ${Math.round((settings.interval_seconds||21600)/3600)} uur · ${settings.duration_seconds||10}s testduur<br>${settings.last_error?esc(shorten(settings.last_error,90)):"Telemetry uit · lokaal opgeslagen"}</p></div>`;
+  $("#speed-settings-summary").innerHTML=`<div class="mini-item"><strong>${settings.enabled?"Automatisch actief":"Automatisch uit"}</strong><p>${formatInterval(settings.interval_seconds)} · ${settings.duration_seconds||10}s testduur<br>${settings.last_error?esc(shorten(settings.last_error,90)):"Telemetry uit · lokaal opgeslagen"}</p></div>`;
 }
 
 function switchTab(tab) {
   state.activeTab = tab;
   $$(".tab").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
   $$(".view").forEach(view => view.classList.toggle("active", view.id === `${tab}-view`));
+  if (tab === "patch") renderPatch();
   if (tab === "topology") renderTopology();
   if (tab === "apps") renderApps();
+  if (tab === "admin") renderChanges();
 }
 
 function openPort(portId, deviceId) {
@@ -505,7 +562,9 @@ function openPort(portId, deviceId) {
   form.elements.entity_id.value = state.pendingEntityId || (port.link_kind === "entity" ? port.entity_id : "") || "";
   form.elements.b_port_id.innerHTML = `<option value="">Geen doorverbinding</option>${freePorts(port).map(item => `<option value="${item.id}">${esc(item.display)}</option>`).join("")}`;
   form.elements.b_port_id.value = port.link_kind === "port" ? (port.target_port_id || "") : "";
-  state.pendingEntityId = null;
+  // De keuze pas loslaten als hij is opgeslagen. Hem hier wissen betekende dat
+  // je na "Kies de fysieke poort" één verkeerde klik nodig had om je bedoeling
+  // stilletjes kwijt te raken.
   $("#disconnect-port").classList.toggle("hidden", !port.cable_id);
   renderTrace(port);
   $("#drawer-backdrop").classList.remove("hidden");
@@ -590,6 +649,16 @@ document.addEventListener("click", event => {
   if (!event.target.closest(".search-box")) $("#search-results").classList.add("hidden");
 });
 
+// Een <dialog> sluit vanzelf met Escape; de lades zijn gewone divs met een
+// backdrop die de hele interface blokkeert. Zonder dit zit je vast tot je de
+// juiste × vindt.
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("#search-results").classList.contains("hidden")) { $("#search-results").classList.add("hidden"); return; }
+  if ($("#entity-drawer")?.classList.contains("open")) { closeEntityDrawer(); return; }
+  if ($("#port-drawer")?.classList.contains("open")) closeDrawer();
+});
+
 /* ------------------------------------------------- recente veranderingen */
 // De auditlog zegt wat jíj deed; dit zegt wat het netwerk deed.
 async function renderChanges() {
@@ -602,7 +671,7 @@ async function renderChanges() {
           <div><strong>${esc(item.name)}</strong><span>${esc(categoryLabel(item.type))}${item.vendor ? ` · ${esc(item.vendor)}` : ""}</span></div></div>
         <div><span class="data-cell-label">${kind === "new" ? "Verschenen" : "Laatst gezien"}</span><br>${formatTime(kind === "new" ? item.first_seen_at : item.last_seen_at)}</div>
         <div>${esc(item.ip_address || item.mac_address || "—")}</div>
-        <div><span class="pill ${kind === "new" ? "new" : "gone"}">${kind === "new" ? "nieuw" : "weg"}</span></div>
+        <div><span class="change-pill ${kind === "new" ? "new" : "gone"}">${kind === "new" ? "nieuw" : "weg"}</span></div>
       </div>`;
     const parts = [...data.appeared.map(item => row(item, "new")), ...data.vanished.map(item => row(item, "gone"))];
     $("#changes-list").innerHTML = parts.length ? parts.join("") : `<div class="empty-state">Niets veranderd in deze periode.</div>`;
@@ -710,7 +779,7 @@ $("#app-form").addEventListener("submit", async event => {
 $("#app-delete").addEventListener("click", async () => {
   const linkId = $("#app-form").elements.link_id.value;
   const link = (state.data.app_links || []).find(item => item.id === linkId);
-  if (!link || !confirm(`${link.name} verwijderen?`)) return;
+  if (!link || !(await confirmAction({title:"App verwijderen?",message:`${link.name} wordt uit de snelkoppelingen verwijderd.`,confirmLabel:"App verwijderen"}))) return;
   try {
     await api(`/api/app-links/${linkId}`, {method: "DELETE"});
     $("#app-dialog").close();
@@ -755,7 +824,7 @@ function renderEndpointRows(endpoints) {
       <label class="tiny">Device<select data-endpoint="entity_id"><option value="">— kies een device —</option>${
         choices.map(choice => `<option value="${esc(choice.id)}"${choice.id === endpoint.entity_id ? " selected" : ""}>${esc(choice.label)}</option>`).join("")
       }</select></label>
-      <button type="button" class="icon-button danger-icon" data-endpoint-remove title="Endpoint verwijderen">×</button>
+      <button type="button" class="icon-button danger-icon" data-endpoint-remove title="Endpoint verwijderen" aria-label="Endpoint verwijderen">×</button>
     </div>`).join("");
 }
 
@@ -845,7 +914,8 @@ function openPhysical(deviceId=""){
   // die daarover gaat en het apparaat krijgt diens status.
   $("#physical-monitor-select").innerHTML=`<option value="">— geen statusmonitor —</option>${state.data.entities.filter(entity=>!entity.archived).map(entity=>
     `<option value="${esc(entity.id)}"${entity.id===device?.monitor_entity_id?" selected":""}>${esc(entity.name)} · ${esc(categoryLabel(entity.type))}</option>`).join("")}`;
-  if(device){["name","type","model","location","notes"].forEach(key=>form.elements[key].value=device[key]||"");form.elements.ports.value=device.ports.length;}
+  $("#physical-submit").textContent=device?"Wijzigingen opslaan":"Toevoegen";
+  if(device){["name","type","model","location","notes"].forEach(key=>form.elements[key].value=device[key]||"");form.elements.ports.value=new Set(device.ports.map(port=>port.number)).size;}
   $("#physical-dialog").showModal();
 }
 
@@ -859,8 +929,17 @@ function nodeOptions(selected="", exclude="") {
 function openTopologyNode(nodeId) {
   const node=state.data.topology.nodes.find(item=>item.id===nodeId); if(!node)return;
   const form=$("#topology-node-form"); form.elements.node_id.value=node.id; form.elements.label.value=node.label; form.elements.subtitle.value=node.subtitle||"";
+  form.elements.hidden.checked=Boolean(node.hidden);
   form.elements.parent_node_id.innerHTML=nodeOptions(node.parent_node_id||"",node.id); form.elements.lifecycle.value=node.lifecycle||"active"; form.elements.collapsed.checked=Boolean(node.collapsed);
   $("#delete-topology-group").classList.toggle("hidden",node.reference_type!=="group");
+  // Een knoop is een weergave van een device of netwerkapparaat; verwijderen
+  // doe je bij het ding zelf. Zonder deze knop was dat vanaf hier niet te
+  // vinden en leek de topologie een doodlopende straat.
+  const source=["entity","physical"].includes(node.reference_type)&&node.reference_id;
+  $("#open-topology-source").classList.toggle("hidden",!source);
+  $("#open-topology-source").textContent=node.reference_type==="physical"?"Netwerkapparaat bewerken…":"Device bewerken…";
+  $("#open-topology-source").dataset.kind=node.reference_type||"";
+  $("#open-topology-source").dataset.id=node.reference_id||"";
   $("#topology-node-dialog").showModal();
 }
 
@@ -871,9 +950,21 @@ function openDns(recordId="") {
   $("#dns-dialog").showModal();
 }
 
-function prepareRelationDialog() {
+function prepareRelationDialog(relationId="") {
   const options=(state.data.topology?.nodes||[]).map(node=>`<option value="${esc(node.id)}">${esc(node.label)}</option>`).join("");
-  const form=$("#topology-relation-form");form.elements.from_node_id.innerHTML=options; form.elements.to_node_id.innerHTML=options;if(form.elements.to_node_id.options.length>1)form.elements.to_node_id.selectedIndex=1; $("#topology-relation-dialog").showModal();
+  const form=$("#topology-relation-form"),relation=relationId?(state.data.topology?.relations||[]).find(item=>item.id===relationId&&item.source==="manual"):null;
+  form.reset();form.elements.relation_id.value=relation?.id||"";
+  form.elements.from_node_id.innerHTML=options;form.elements.to_node_id.innerHTML=options;
+  if(relation){
+    form.elements.from_node_id.value=relation.from_node_id;form.elements.to_node_id.value=relation.to_node_id;
+    form.elements.relation_type.value=relation.relation_type;form.elements.label.value=relation.label||"";
+  }else if(form.elements.to_node_id.options.length>1)form.elements.to_node_id.selectedIndex=1;
+  [form.elements.from_node_id,form.elements.to_node_id,form.elements.relation_type,form.elements.label].forEach(field=>{field.disabled=Boolean(relation);});
+  $("#topology-relation-title").textContent=relation?"Relatie beheren":"Relatie tekenen";
+  $("#topology-relation-help").textContent=relation?"Deze handmatige relatie kan hier veilig worden verwijderd. Automatische en fysieke relaties beheer je bij hun bron.":"Leg een handmatige relatie vast tussen twee nodes.";
+  $("#delete-topology-relation").classList.toggle("hidden",!relation);
+  $("#save-topology-relation").classList.toggle("hidden",Boolean(relation));
+  $("#topology-relation-dialog").showModal();
 }
 
 let drag=null;
@@ -896,6 +987,13 @@ $("#topology-canvas").addEventListener("pointermove",event=>{
   tooltip.style.left=`${event.clientX+14}px`;tooltip.style.top=`${event.clientY+14}px`;tooltip.classList.remove("hidden");
 });
 $("#topology-canvas").addEventListener("pointerleave",()=>$("#topology-tooltip").classList.add("hidden"));
+$("#topology-canvas").addEventListener("keydown",event=>{
+  if(!state.editingTopology||!["Enter"," "].includes(event.key))return;
+  const relation=event.target.closest(".relation-hit.manual");
+  const node=event.target.closest("[data-node-id]");
+  if(relation){prepareRelationDialog(relation.dataset.relationId);event.preventDefault();}
+  else if(node){openTopologyNode(node.dataset.nodeId);event.preventDefault();}
+});
 $("#topology-canvas").addEventListener("pointerup",async event=>{
   if(!drag)return;const current=drag;drag=null;
   if(!current.moved){if(state.selectedNodes.size===1)openTopologyNode(current.nodeId);renderTopology();return;}
@@ -918,7 +1016,7 @@ async function confirmDeletion(kind,id) {
     if(c.provider_links)lines.push(`${c.provider_links} providerkoppeling(en) worden losgemaakt; het device kan bij een volgende sync terugkeren als discovery`);
     if(c.topology_relations)lines.push(`${c.topology_relations} topologierelatie(s) verdwijnen`);
     const message=`${impact.name} verwijderen?\n\n${lines.length?lines.map(line=>`• ${line}`).join("\n"):"Er zijn geen gekoppelde gegevens."}\n\nDit kan niet ongedaan worden gemaakt, behalve via een back-up.`;
-    if(!confirm(message))return;
+    if(!(await confirmAction({title:`${impact.name} verwijderen?`,message,confirmLabel:`${label[0].toUpperCase()+label.slice(1)} verwijderen`})))return;
     await api(`${base}/${encodeURIComponent(id)}?confirm=${encodeURIComponent(impact.name)}`,{method:"DELETE"});
     await loadData(true);toast(`${label[0].toUpperCase()+label.slice(1)} verwijderd`);
   } catch(error){toast(error.message,"error");}
@@ -939,8 +1037,8 @@ document.addEventListener("click", async event => {
   const resolve = event.target.closest("[data-resolve-conflict]");
   if (resolve) { try { await api(`/api/conflicts/${resolve.dataset.resolveConflict}/resolve`, {method:"POST",body:JSON.stringify({resolution:"manual_kept"})}); await loadData(true); toast("Handmatige waarde behouden"); } catch(error){toast(error.message,"error");} }
   const dnsEdit=event.target.closest("[data-dns-edit]");if(dnsEdit)openDns(dnsEdit.dataset.dnsEdit);
-  const dnsDelete=event.target.closest("[data-dns-delete]");if(dnsDelete&&confirm("Dit handmatige DNS-record verwijderen?")){try{await api(`/api/dns-records/${dnsDelete.dataset.dnsDelete}`,{method:"DELETE"});await loadData(true);toast("DNS-record verwijderd");}catch(error){toast(error.message,"error");}}
-  const relation=event.target.closest(".relation-hit.manual");if(relation&&state.editingTopology&&confirm("Deze handmatige relatie verwijderen?")){try{await api(`/api/topology/relations/${encodeURIComponent(relation.dataset.relationId)}`,{method:"DELETE"});await loadData(true);toast("Relatie verwijderd");}catch(error){toast(error.message,"error");}}
+  const dnsDelete=event.target.closest("[data-dns-delete]");if(dnsDelete&&await confirmAction({title:"DNS-record verwijderen?",message:"Dit handmatige DNS-record wordt definitief verwijderd.",confirmLabel:"DNS-record verwijderen"})){try{await api(`/api/dns-records/${dnsDelete.dataset.dnsDelete}`,{method:"DELETE"});await loadData(true);toast("DNS-record verwijderd");}catch(error){toast(error.message,"error");}}
+  const relation=event.target.closest(".relation-hit.manual");if(relation&&state.editingTopology)prepareRelationDialog(relation.dataset.relationId);
   const entityDelete=event.target.closest("[data-entity-delete]");if(entityDelete)confirmDeletion("entity",entityDelete.dataset.entityDelete);
   const physicalDelete=event.target.closest("[data-physical-delete]");if(physicalDelete)confirmDeletion("physical",physicalDelete.dataset.physicalDelete);
   const entityEdit=event.target.closest("[data-entity-edit]");if(entityEdit)openEntity(entityEdit.dataset.entityEdit);
@@ -950,7 +1048,7 @@ document.addEventListener("click", async event => {
   const providerDelete=event.target.closest("[data-provider-delete]");
   if(providerDelete){
     const provider=state.data.providers.find(item=>item.id===providerDelete.dataset.providerDelete);
-    if(provider&&prompt(`Typ de naam om te bevestigen:\n\n${provider.name}`)===provider.name){
+    if(provider&&await confirmAction({title:"Databron verwijderen?",message:"Records en inloggegevens van deze omgeving worden verwijderd. Typ de exacte naam om door te gaan.",confirmLabel:"Databron verwijderen",expectedText:provider.name})){
       try{await api(`/api/providers/${encodeURIComponent(provider.id)}?confirm=${encodeURIComponent(provider.name)}`,{method:"DELETE"});await loadData(true);toast("Databron verwijderd");}
       catch(error){toast(error.message,"error");}
     }
@@ -966,7 +1064,7 @@ document.addEventListener("click", async event => {
   if(uplinkClear){const id=uplinkClear.dataset.uplinkClear;try{await api(`/api/entities/${encodeURIComponent(id)}/uplink`,{method:"PUT",body:JSON.stringify({physical_device_id:null})});await loadData(true);toast("Losgekoppeld");}catch(error){toast(error.message,"error");}}
   const discovery=event.target.closest("[data-discovery-state]");
   if(discovery){const mode=discovery.dataset.discoveryState,payload=mode==="ignore"?{ignored:true,archived:false}:mode==="archive"?{ignored:false,archived:true}:{ignored:false,archived:false};try{await api(`/api/entities/${discovery.dataset.entityId}/discovery-state`,{method:"PATCH",body:JSON.stringify(payload)});await loadData(true);toast(mode==="restore"?"Discovery hersteld":mode==="ignore"?"Discovery genegeerd":"Discovery gearchiveerd");}catch(error){toast(error.message,"error");}}
-  const restore=event.target.closest("[data-backup-restore]");if(restore){const name=restore.dataset.backupRestore;if(confirm(`${name} terugzetten?\n\nDe huidige database wordt eerst automatisch veiliggesteld. Je sessie kan daarna verlopen.`)){try{await api(`/api/backups/${encodeURIComponent(name)}/restore?confirm=${encodeURIComponent(name)}`,{method:"POST"});toast("Back-up hersteld; app wordt herladen");setTimeout(()=>location.reload(),800);}catch(error){toast(error.message,"error");}}}
+  const restore=event.target.closest("[data-backup-restore]");if(restore){const name=restore.dataset.backupRestore;if(await confirmAction({title:"Back-up terugzetten?",message:`${name} wordt teruggezet. De huidige database wordt eerst automatisch veiliggesteld; je sessie kan daarna verlopen.`,confirmLabel:"Back-up herstellen"})){try{await api(`/api/backups/${encodeURIComponent(name)}/restore?confirm=${encodeURIComponent(name)}`,{method:"POST"});toast("Back-up hersteld; app wordt herladen");setTimeout(()=>location.reload(),800);}catch(error){toast(error.message,"error");}}}
 });
 
 $("#auth-form").addEventListener("submit", async event => {
@@ -990,6 +1088,13 @@ $("#new-physical-button").addEventListener("click", () => openPhysical());
 $$('.modal-close').forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 $$('.drawer-close').forEach(button => button.addEventListener("click", closeDrawer));
 $("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#pending-link").addEventListener("click", event => {
+  if (!event.target.closest("#cancel-pending")) return;
+  state.pendingEntityId = null;
+  renderPatch();
+  toast("Koppelen geannuleerd");
+});
+
 $$('[data-layer]').forEach(input => input.addEventListener("change", renderTopology));
 
 $("#entity-form").addEventListener("submit", async event => {
@@ -1025,6 +1130,7 @@ $("#port-form").addEventListener("submit", async event => {
   try {
     if (payload.b_entity_id || payload.b_port_id) await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"PUT", body:JSON.stringify(payload)});
     else await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"DELETE"});
+    state.pendingEntityId = null;
     closeDrawer(); await loadData(true); toast(payload.b_entity_id || payload.b_port_id ? "Kabel opgeslagen" : "Poort vrijgemaakt");
   } catch(error){toast(error.message,"error");}
 });
@@ -1075,13 +1181,15 @@ $("#topology-edit").addEventListener("click",()=>{state.editingTopology=true;sta
 $("#finish-edit").addEventListener("click",()=>{state.editingTopology=false;state.selectedNodes.clear();$("#topology-editbar").classList.add("hidden");$("#topology-edit").classList.remove("hidden");renderTopology();});
 $("#add-group").addEventListener("click",()=>{state.groupSelected=false;$("#topology-group-dialog").showModal();});
 $("#group-selection").addEventListener("click",()=>{state.groupSelected=true;$("#topology-group-dialog").showModal();});
-$("#add-relation").addEventListener("click",prepareRelationDialog);
+$("#add-relation").addEventListener("click",()=>prepareRelationDialog());
 $("#reset-layout").addEventListener("click",async()=>{try{await api("/api/topology/layout/reset",{method:"POST"});await loadData(true);toast("Automatische indeling hersteld");}catch(error){toast(error.message,"error");}});
 $("#topology-undo").addEventListener("click",async()=>{try{const result=await api("/api/topology/undo",{method:"POST"});state.selectedNodes.clear();await loadData(true);toast(`${result.undone} ongedaan gemaakt`);}catch(error){toast(error.message,"error");}});
-$("#topology-node-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),nodeId=payload.node_id;delete payload.node_id;payload.parent_node_id=payload.parent_node_id||null;payload.collapsed=form.elements.collapsed.checked;payload.hidden=false;try{await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Node opgeslagen");}catch(error){toast(error.message,"error");}});
+$("#topology-node-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),nodeId=payload.node_id;delete payload.node_id;payload.parent_node_id=payload.parent_node_id||null;payload.collapsed=form.elements.collapsed.checked;payload.hidden=form.elements.hidden.checked;try{await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Node opgeslagen");}catch(error){toast(error.message,"error");}});
 $("#topology-group-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.node_ids=state.groupSelected?[...state.selectedNodes]:[];try{await api("/api/topology/groups",{method:"POST",body:JSON.stringify(payload)});state.selectedNodes.clear();state.groupSelected=false;form.reset();form.closest("dialog").close();await loadData(true);toast(payload.node_ids.length?"Selectie gegroepeerd":"Groep toegevoegd");}catch(error){toast(error.message,"error");}});
-$("#topology-relation-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget;try{await api("/api/topology/relations",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();form.closest("dialog").close();await loadData(true);toast("Relatie toegevoegd");}catch(error){toast(error.message,"error");}});
-$("#delete-topology-group").addEventListener("click",async()=>{const form=$("#topology-node-form"),node=state.data.topology.nodes.find(item=>item.id===form.elements.node_id.value);if(node&&confirm(`${node.label} verwijderen? Kinderen worden uit de groep gehaald.`)){try{await api(`/api/topology/groups/${encodeURIComponent(node.id)}?confirm=${encodeURIComponent(node.label)}`,{method:"DELETE"});form.closest("dialog").close();state.selectedNodes.delete(node.id);await loadData(true);toast("Groep verwijderd");}catch(error){toast(error.message,"error");}}});
+$("#topology-relation-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));if(payload.relation_id)return;delete payload.relation_id;try{await api("/api/topology/relations",{method:"POST",body:JSON.stringify(payload)});form.reset();form.closest("dialog").close();await loadData(true);toast("Relatie toegevoegd");}catch(error){toast(error.message,"error");}});
+$("#delete-topology-relation").addEventListener("click",async()=>{const form=$("#topology-relation-form"),relationId=form.elements.relation_id.value;if(!relationId)return;if(!(await confirmAction({title:"Relatie verwijderen?",message:"Alleen deze handmatige relatie wordt verwijderd; de verbonden apparaten blijven bestaan.",confirmLabel:"Relatie verwijderen"})))return;try{await api(`/api/topology/relations/${encodeURIComponent(relationId)}`,{method:"DELETE"});form.closest("dialog").close();await loadData(true);toast("Relatie verwijderd");}catch(error){toast(error.message,"error");}});
+$("#open-topology-source").addEventListener("click",()=>{const button=$("#open-topology-source");$("#topology-node-dialog").close();if(button.dataset.kind==="physical")openPhysical(button.dataset.id);else openEntity(button.dataset.id);});
+$("#delete-topology-group").addEventListener("click",async()=>{const form=$("#topology-node-form"),node=state.data.topology.nodes.find(item=>item.id===form.elements.node_id.value);if(node&&await confirmAction({title:"Topologiegroep verwijderen?",message:`${node.label} wordt verwijderd. Kinderen worden uit de groep gehaald maar blijven bestaan.`,confirmLabel:"Groep verwijderen"})){try{await api(`/api/topology/groups/${encodeURIComponent(node.id)}?confirm=${encodeURIComponent(node.label)}`,{method:"DELETE"});form.closest("dialog").close();state.selectedNodes.delete(node.id);await loadData(true);toast("Groep verwijderd");}catch(error){toast(error.message,"error");}}});
 
 $("#new-dns-record").addEventListener("click",()=>openDns());
 $("#dns-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.ttl=payload.ttl?Number(payload.ttl):null;payload.entity_id=payload.entity_id||null;payload.enabled=true;const path=form.dataset.recordId?`/api/dns-records/${form.dataset.recordId}`:"/api/dns-records";try{await api(path,{method:form.dataset.recordId?"PATCH":"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("DNS-record opgeslagen");}catch(error){toast(error.message,"error");}});
@@ -1089,7 +1197,7 @@ $("#dns-form").addEventListener("submit",async event=>{event.preventDefault();co
 function downloadJson(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"})),link=document.createElement("a");link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $("#config-export").addEventListener("click",async()=>{try{const config=await api("/api/config/export");downloadJson(config,`plugnet-config-${new Date().toISOString().slice(0,10)}.json`);toast("Configuratie geëxporteerd");}catch(error){toast(error.message,"error");}});
 $("#config-import-button").addEventListener("click",()=>$("#config-import-file").click());
-$("#config-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());if(!confirm(`${file.name} samenvoegen met de huidige configuratie? Eerst wordt automatisch een back-up gemaakt.`))return;const result=await api("/api/config/import",{method:"POST",body:JSON.stringify(payload)});await loadData(true);toast(`${result.records} configuratierecords geïmporteerd`);}catch(error){toast(error instanceof SyntaxError?"Ongeldig JSON-bestand":error.message,"error");}finally{event.target.value="";}});
+$("#config-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());if(!(await confirmAction({title:"Configuratie importeren?",message:`${file.name} wordt samengevoegd met de huidige configuratie. Eerst wordt automatisch een back-up gemaakt.`,confirmLabel:"Configuratie importeren"})))return;const result=await api("/api/config/import",{method:"POST",body:JSON.stringify(payload)});await loadData(true);toast(`${result.records} configuratierecords geïmporteerd`);}catch(error){toast(error instanceof SyntaxError?"Ongeldig JSON-bestand":error.message,"error");}finally{event.target.value="";}});
 $("#backup-import-button").addEventListener("click",()=>$("#backup-import-file").click());
 $("#backup-import-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;const data=new FormData();data.append("file",file);try{const response=await fetch("/api/backups/import",{method:"POST",headers:{"X-CSRF-Token":state.csrf},body:data});const body=await response.json();if(!response.ok)throw new Error(errorMessage(body,response.status));await loadData(true);toast(`Back-up ${body.name} geïmporteerd`);}catch(error){toast(error.message,"error");}finally{event.target.value="";}});
 
@@ -1151,11 +1259,17 @@ async function runScan() {
   $("#wizard-scan-state").textContent = "bezig met scannen…";
   // Tijdens de scan verschijnen resultaten al: elke vondst wordt los opgeslagen.
   const ticker = setInterval(() => renderScanResults(), 2000);
+  // Zoek de bron op type, niet op een vast id: bronnen zijn instanties geworden
+  // en die van jou kan anders heten. En werk zijn configuratie bij in plaats van
+  // hem te vervangen, anders zet een scan je pollinterval terug op de standaard.
+  const arp = state.data.providers.find(item => item.type === "dhcp_arp");
+  if (!arp) { $("#wizard-scan-state").textContent = "Geen DHCP/ARP-bron gevonden"; button.disabled = false; clearInterval(ticker); return; }
   try {
-    await api("/api/providers/dhcp-arp", {method:"PATCH", body:JSON.stringify({
-      enabled: true, poll_interval_seconds: 300, config: {subnets, scan: subnets.length > 0}, credentials: {},
+    await api(`/api/providers/${encodeURIComponent(arp.id)}`, {method:"PATCH", body:JSON.stringify({
+      name: arp.name, enabled: true, poll_interval_seconds: arp.poll_interval_seconds,
+      config: {...arp.config, subnets, scan: subnets.length > 0}, credentials: {},
     })});
-    const result = await api("/api/providers/dhcp-arp/sync", {method:"POST"});
+    const result = await api(`/api/providers/${encodeURIComponent(arp.id)}/sync`, {method:"POST"});
     $("#wizard-scan-state").textContent = `${result.records} apparaten gevonden`;
   } catch (error) {
     $("#wizard-scan-state").textContent = error.message;

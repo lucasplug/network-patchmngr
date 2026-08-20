@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import uuid
 
 import pytest
@@ -260,6 +261,54 @@ def test_the_internet_arrives_at_the_ont() -> None:
         assert link["to_node_id"] == "physical:ont-01"
         # De oude spookknoop die een Deco nabootste is weg.
         assert not any(node["id"] == "special:router" for node in topology["nodes"])
+
+
+def test_port_cable_replace_rolls_back_when_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FAT-PAT-017/SYS-020: delete en insert vormen één transactie."""
+    import patch_manager.main as main_module
+
+    with TestClient(app) as client:
+        headers = login(client)
+        original_entity = make_entity(client, headers, "Blijft aangesloten")
+        replacement_entity = make_entity(client, headers, "Nieuwe aansluiting")
+        original = client.put(
+            "/api/ports/switch-01-p4/cable", headers=headers,
+            json={"b_entity_id": original_entity, "label": "oude kabel"},
+        ).json()
+
+        def fail_insert(*_args, **_kwargs):
+            raise sqlite3.OperationalError("geïnjecteerde insertfout")
+
+        monkeypatch.setattr(main_module, "insert_cable", fail_insert)
+        with TestClient(app, raise_server_exceptions=False) as failing_client:
+            login_headers = login(failing_client)
+            response = failing_client.put(
+                "/api/ports/switch-01-p4/cable", headers=login_headers,
+                json={"b_entity_id": replacement_entity, "label": "nieuwe kabel"},
+            )
+        assert response.status_code == 500
+
+    preserved = database.fetch_one("SELECT * FROM cables WHERE id=?", (original["id"],))
+    assert preserved is not None
+    assert preserved["b_entity_id"] == original_entity
+    assert preserved["label"] == "oude kabel"
+
+
+def test_moving_a_cable_is_one_server_side_operation() -> None:
+    with TestClient(app) as client:
+        headers = login(client)
+        entity_id = make_entity(client, headers, "Verplaatsbaar")
+        original = client.put(
+            "/api/ports/switch-01-p1/cable", headers=headers,
+            json={"b_entity_id": entity_id, "label": "P-01"},
+        ).json()
+        moved = client.put(
+            "/api/ports/switch-01-p2/cable", headers=headers,
+            json={"b_entity_id": entity_id, "label": "P-01", "move_cable_id": original["id"]},
+        )
+        assert moved.status_code == 200, moved.text
+    cables = database.fetch_all("SELECT a_port_id,b_entity_id,label FROM cables")
+    assert cables == [{"a_port_id": "switch-01-p2", "b_entity_id": entity_id, "label": "P-01"}]
 
 
 def test_a_patch_panel_is_traversed_not_drawn() -> None:

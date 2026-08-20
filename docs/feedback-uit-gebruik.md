@@ -18,8 +18,33 @@ issue-tracker — één regel per punt volstaat.
 | 10 | Graag een licht thema | De CSS had een tokenblok, maar 121 harde kleuren daarbuiten — waaronder donkere vlakken en lichte tekstkleuren | Alle overlays via `--tint`, vlakken en merkkleuren naar tokens; licht thema is nu één `[data-theme="light"]`-blok |
 | 11 | Een pagina zoals Homarr: links naar apps met status uit Uptime Kuma | Bestond niet | Tabblad **Apps** met tegels per groep; status via dezelfde monitorkoppeling als netwerkapparaten |
 | 12 | Kan de DHCP/ARP-scan beter? | Drie dingen: niets werd ooit op `down` gezet, de reverse lookups liepen serieel (200 apparaten x 2s > het pollinterval), en een enkel ping-pakket laat apparaten flapperen | `_mark_absent()` na een scan, parallelle lookups, `ping -c 2`, en een harde tijdslimiet op de sweep |
+| 13 | Migratie op een bestaande database wist provider_secrets en provider_records | Bij `ALTER TABLE providers RENAME` herschrijft SQLite de foreign keys van vier verwijzende tabellen mee; `DROP TABLE` cascadeerde hun rijen daarna weg. De migratietest bevatte die vier tabellen niet, dus bewees niets | Herbouw via de gedocumenteerde route (nieuwe tabel, kopiëren, oude weg, hernoemen) met `foreign_keys=OFF` en een `foreign_key_check` achteraf |
+| 14 | CSV boven 1 MB werd stil afgekapt | `file.read(1_000_000)` sneed halverwege een regel af en liet duizenden apparaten vallen, met een melding die 'gelukt' zei | Weigeren met HTTP 413 in plaats van afkappen |
+| 15 | Escape sluit de lades niet | Een `<dialog>` sluit vanzelf met Escape, de lades zijn gewone divs met een blokkerende backdrop. Halve app reageerde op Escape, andere helft niet | Eén keydown-handler voor lades en zoekresultaten |
+| 16 | De 'draagbaar'-badge stond ineens in hoofdletters | Een tweede `.pill`-definitie voor het veranderingenoverzicht botste met de bestaande | Eigen naam `.change-pill` |
+| 17 | De wizard zette het pollinterval van de ARP-bron terug | `runScan()` gebruikte een hardgecodeerd provider-id en verving de hele config | Bron opzoeken op type, en de config bijwerken in plaats van vervangen |
+| 18 | `/api/changes` werd elke 30 seconden opgehaald | `renderChanges()` hing in `renderAll()`, die ook op de poll draait | Alleen ophalen als het Admin-tabblad open staat |
+| 19 | In de topologie kun je niets verwijderen | Klopt, en dat blijft zo: een knoop is een afbeelding van een device, niet het device zelf. Maar er was ook geen weg naar dat device toe, dus de topologie liep dood | Knop **Apparaat bewerken…** in het knoopdialoog, plus verbergen als lichte variant |
+| 20 | Verbergen was een deur die alleen dichtgaat | De backend stuurde verborgen knopen helemaal niet mee (`WHERE n.hidden=0`), en de frontend zette `hidden` bij opslaan hard op `false`. Verbergen was dus niet te bedienen en niet terug te draaien | Knopen komen mee, de laag **verborgen** toont ze, met een teller die verklapt dat er iets weg is |
+| 21 | "Kies de fysieke poort" verdween stil | `pendingEntityId` werd gewist zodra de poortlade opende. Eén klik naast de knop en je bedoeling was weg, zonder melding | De keuze blijft tot hij is opgeslagen of geannuleerd, en staat als balk boven **Nog te koppelen** |
+| 22 | `/api/bootstrap` gaf 500 zodra Portainer én Glances dezelfde container zagen | `sync_topology_catalog` voegde entity-knopen in rowid-volgorde in. Een container die Glances eerst vond en Portainer daarna aan een andere host hing, hield zijn lage rowid maar kreeg een ouder met een hógere rowid; de foreign key op `parent_node_id` verwees dan naar een knoop die nog niet bestond. Bootstrap, summary én topologie vielen om — precies bij deze opstelling (beide op 192.168.1.12) | Ouders in een tweede ronde koppelen, ná alle knopen. Een ouder zonder eigen knoop levert een lege koppeling op in plaats van een crash. `tests/test_topology_catalog.py` |
+| 23 | Een DNS-record met een onbekend gekoppeld device gaf HTTP 500 | De foreign key op `dns_records.entity_id` sloeg pas tijdens de INSERT toe; een kale 500 op wat gewoon ongeldige invoer is | `resolve_dns_entity()` controleert vooraf en geeft 404, op create én update. `tests/test_app.py` |
+| 24 | Een database van een nieuwere versie werd wél geweigerd, maar niet ongemoeid gelaten | `executescript(SCHEMA)` zette er eerst tabellen bij en pas daarna sloeg de versiecheck toe | Versiecheck naar vóór het aanraken van het schema; een nieuwere DB blijft nu byte-voor-byte intact |
+| 25 | De kop schoof horizontaal weg op een smal telefoonscherm | Titel + snelheidsindicator + zoekveld + knoppen pasten samen niet in 390px | Onder 600px vervalt de snelheidsindicator (staat ook in Topologie) en krimpt het zoekveld |
+
+## Volledige acceptatietest (FAT-plan 0.4.0)
+
+Punt 22 tot en met 25 komen uit een volledige doorloop van het FAT-plan: 177 Test-IDs over aanmelden, wizard, patch, providers, topologie, DNS, speedtest, back-up/herstel, config-uitwisseling en systeem. Alle zeven provideradapters zijn tegen lokale fixtures gedraaid. De vier gevonden gebreken zijn gefixt en met een regressietest vastgelegd; daarna slaagt alles. De adapters bleven read-only en de handmatige waarheid leidend.
 
 ## Bijvangst bij deze punten
+
+- **Van tabblad wisselen tekende de patchview niet opnieuw.** `switchTab()`
+  hertekende topologie, apps en admin, maar niet patch. Dat viel pas op toen
+  de hangende-koppelingsbalk na "Poort" op een discovery onzichtbaar bleef.
+- **Escape sluit de setup-wizard, maar onthoudt dat niet.** De kruisknop doet
+  een `PATCH /api/wizard/info {dismissed:true}`, Escape sluit alleen het
+  `<dialog>`. Bij de volgende reload staat hij er weer. Bewust zo gelaten:
+  wegklikken met de knop is de bevestiging, Escape is uitstel.
 
 - **Nul-MAC's vielen op één apparaat samen.** `_store_record` koppelt vondsten
   op MAC-adres. Alle spookvondsten uit punt 1 deelden `00:00:00:00:00:00` en
@@ -65,6 +90,14 @@ issue-tracker — één regel per punt volstaat.
   een providerrecord is `host:<entity_id>` geworden: verandert de hostnaam van
   een machine, dan blijft het dezelfde rij. Een afwijkende naam levert bij een
   expliciete koppeling ook geen conflict meer op — dat is juist de bedoeling.
+
+## Testen: heen én terug
+
+`tests/test_e2e_browser.py` klikt de app door met Chromium. De regel daar is:
+elk scenario maakt iets, en maakt het daarna weer ongedaan, en controleert dat
+de wereld dan is zoals hij was. Punt 19 tot en met 21 kwamen alle drie uit
+terugwegen die nooit gelopen waren. De test faalt aantoonbaar op de code van
+vóór die fixes.
 
 ## Schema wijzigen: vanaf nu met migratie
 
