@@ -499,3 +499,34 @@ def test_restore_of_corrupt_backup_returns_422() -> None:
         )
         assert response.status_code == 422
         assert "hersteld" in response.json()["detail"]
+
+
+def test_dns_record_rejects_unknown_entity_with_404_not_500() -> None:
+    """Een onbekend gekoppeld device hoort een nette 404 te geven.
+
+    De foreign key op dns_records.entity_id sloeg eerder pas tijdens de INSERT
+    toe en dat werd een kale 500 op iets wat gewoon ongeldige invoer is.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.post("/api/auth/login", json=CREDENTIALS)
+        headers = {"X-CSRF-Token": response.json()["csrf_token"]}
+        created = client.post(
+            "/api/dns-records", headers=headers,
+            json={"name": "spook.home.arpa", "record_type": "A", "value": "192.168.1.9",
+                  "entity_id": "bestaat-niet"},
+        )
+        assert created.status_code == 404, created.text
+        # En op de update-weg net zo.
+        real = client.post(
+            "/api/dns-records", headers=headers,
+            json={"name": "echt.home.arpa", "record_type": "A", "value": "192.168.1.10"},
+        )
+        record_id = real.json()["id"]
+        updated = client.patch(
+            f"/api/dns-records/{record_id}", headers=headers,
+            json={"name": "echt.home.arpa", "record_type": "A", "value": "192.168.1.10",
+                  "entity_id": "bestaat-niet"},
+        )
+        assert updated.status_code == 404, updated.text

@@ -89,21 +89,40 @@ def sync_topology_catalog(database: Database) -> None:
             """DELETE FROM topology_nodes WHERE reference_type='entity' AND reference_id IN
                  (SELECT monitor_entity_id FROM physical_devices WHERE monitor_entity_id IS NOT NULL)"""
         )
+        # De ouderverwijzing pas in een tweede ronde zetten. Een kind kan een
+        # lagere rowid hebben dan zijn ouder — bijvoorbeeld een container die
+        # Glances eerst vond en Portainer daarna aan een andere host hing — en
+        # dan bestaat de ouderknoop nog niet als we het kind invoegen. De
+        # foreign key op parent_node_id sloeg daar hard op, en /api/bootstrap
+        # gaf 500. Eerst alle knopen zonder ouder, dan pas koppelen.
         for index, entity in enumerate(entities):
             node_id = f"entity:{entity['id']}"
-            parent_node_id = f"entity:{entity['parent_id']}" if entity["parent_id"] else None
             connection.execute(
                 """INSERT INTO topology_nodes
                    (id,reference_type,reference_id,label,subtitle,node_type,parent_node_id,parent_source,x,y,width,height,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)
                    ON CONFLICT(reference_type,reference_id) DO UPDATE SET
                    label=CASE WHEN topology_nodes.metadata_json='{}' THEN excluded.label ELSE topology_nodes.label END,
                    subtitle=excluded.subtitle,node_type=excluded.node_type,
-                   parent_node_id=CASE WHEN topology_nodes.parent_source='auto' THEN excluded.parent_node_id ELSE topology_nodes.parent_node_id END,
                    updated_at=excluded.updated_at""",
                 (node_id, "entity", entity["id"], entity["name"],
                  entity["ip_address"] or entity["hostname"] or entity["type"], entity["type"],
-                 parent_node_id, "auto", 40 + (index % 5) * 220, 390 + (index // 5) * 90, 180, 58, now, now),
+                 "auto", 40 + (index % 5) * 220, 390 + (index // 5) * 90, 180, 58, now, now),
+            )
+
+        # Tweede ronde: nu alle entity-knopen bestaan, kunnen we auto-ouders
+        # veilig zetten. Een ouder die zelf geen knoop kreeg (genegeerd,
+        # gearchiveerd, of statusmonitor) levert geen dangling verwijzing op:
+        # dan blijft de koppeling leeg. Handmatige ouders blijven ongemoeid.
+        node_ids = {row["id"] for row in connection.execute(
+            "SELECT id FROM topology_nodes WHERE reference_type='entity'").fetchall()}
+        for entity in entities:
+            parent_node_id = f"entity:{entity['parent_id']}" if entity["parent_id"] else None
+            if parent_node_id not in node_ids:
+                parent_node_id = None
+            connection.execute(
+                "UPDATE topology_nodes SET parent_node_id=? WHERE id=? AND parent_source='auto'",
+                (parent_node_id, f"entity:{entity['id']}"),
             )
 
         # Patch relations are fully derived from the cable graph. A device port

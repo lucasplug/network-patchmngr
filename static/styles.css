@@ -139,3 +139,14 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .status-button:hover .status-dot{box-shadow:0 0 0 3px rgba(var(--tint),.12)}
 
 .pending-link{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid rgba(var(--accent-rgb),.45);border-radius:8px;background:rgba(var(--accent-rgb),.1);color:var(--ink);font-size:11px}
+
+/* Op een smal telefoonscherm paste de kop niet in beeld: titel + snelheidsindicator +
+   zoekveld + knoppen samen samen breder dan het scherm, waardoor de hele pagina
+   meeschuiven. De snelheidsindicator staat ook in het topologie-tabblad, dus
+   die mag hier weg; het zoekveld krimpt mee. */
+@media(max-width:600px){
+  .speed-indicator{display:none}
+  .search-box input,.search-box input:focus{width:112px}
+  .brand{font-size:18px}
+  .top-actions{gap:7px}
+}

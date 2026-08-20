@@ -27,6 +27,14 @@ issue-tracker — één regel per punt volstaat.
 | 19 | In de topologie kun je niets verwijderen | Klopt, en dat blijft zo: een knoop is een afbeelding van een device, niet het device zelf. Maar er was ook geen weg naar dat device toe, dus de topologie liep dood | Knop **Apparaat bewerken…** in het knoopdialoog, plus verbergen als lichte variant |
 | 20 | Verbergen was een deur die alleen dichtgaat | De backend stuurde verborgen knopen helemaal niet mee (`WHERE n.hidden=0`), en de frontend zette `hidden` bij opslaan hard op `false`. Verbergen was dus niet te bedienen en niet terug te draaien | Knopen komen mee, de laag **verborgen** toont ze, met een teller die verklapt dat er iets weg is |
 | 21 | "Kies de fysieke poort" verdween stil | `pendingEntityId` werd gewist zodra de poortlade opende. Eén klik naast de knop en je bedoeling was weg, zonder melding | De keuze blijft tot hij is opgeslagen of geannuleerd, en staat als balk boven **Nog te koppelen** |
+| 22 | `/api/bootstrap` gaf 500 zodra Portainer én Glances dezelfde container zagen | `sync_topology_catalog` voegde entity-knopen in rowid-volgorde in. Een container die Glances eerst vond en Portainer daarna aan een andere host hing, hield zijn lage rowid maar kreeg een ouder met een hógere rowid; de foreign key op `parent_node_id` verwees dan naar een knoop die nog niet bestond. Bootstrap, summary én topologie vielen om — precies bij deze opstelling (beide op 192.168.1.12) | Ouders in een tweede ronde koppelen, ná alle knopen. Een ouder zonder eigen knoop levert een lege koppeling op in plaats van een crash. `tests/test_topology_catalog.py` |
+| 23 | Een DNS-record met een onbekend gekoppeld device gaf HTTP 500 | De foreign key op `dns_records.entity_id` sloeg pas tijdens de INSERT toe; een kale 500 op wat gewoon ongeldige invoer is | `resolve_dns_entity()` controleert vooraf en geeft 404, op create én update. `tests/test_app.py` |
+| 24 | Een database van een nieuwere versie werd wél geweigerd, maar niet ongemoeid gelaten | `executescript(SCHEMA)` zette er eerst tabellen bij en pas daarna sloeg de versiecheck toe | Versiecheck naar vóór het aanraken van het schema; een nieuwere DB blijft nu byte-voor-byte intact |
+| 25 | De kop schoof horizontaal weg op een smal telefoonscherm | Titel + snelheidsindicator + zoekveld + knoppen pasten samen niet in 390px | Onder 600px vervalt de snelheidsindicator (staat ook in Topologie) en krimpt het zoekveld |
+
+## Volledige acceptatietest (FAT-plan 0.4.0)
+
+Punt 22 tot en met 25 komen uit een volledige doorloop van het FAT-plan: 177 Test-IDs over aanmelden, wizard, patch, providers, topologie, DNS, speedtest, back-up/herstel, config-uitwisseling en systeem. Alle zeven provideradapters zijn tegen lokale fixtures gedraaid. De vier gevonden gebreken zijn gefixt en met een regressietest vastgelegd; daarna slaagt alles. De adapters bleven read-only en de handmatige waarheid leidend.
 
 ## Bijvangst bij deze punten
 

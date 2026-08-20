@@ -521,6 +521,17 @@ class Database:
             fresh = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
             ).fetchone()[0] == 0
+            # Een database van een nieuwere versie herkennen vóórdat we iets
+            # aanraken. Anders zou `executescript(SCHEMA)` er eerst tabellen bij
+            # zetten en pas daarna weigeren, en dan klopt de belofte "raakt een
+            # nieuwere database niet aan" niet meer.
+            if not fresh:
+                existing_version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if existing_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"Database is van een nieuwere versie ({existing_version}) dan deze app "
+                        f"({SCHEMA_VERSION}); start de vorige image of zet een back-up terug."
+                    )
             # SCHEMA zet zelf foreign_keys=ON; daarna staan we weer buiten een
             # transactie, dus pas hier kan de pragma uit.
             connection.executescript(SCHEMA)

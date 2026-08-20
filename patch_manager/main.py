@@ -1906,8 +1906,21 @@ def speedtest_settings_update(payload: SpeedtestSettingsInput, auth: AuthContext
     return {"ok": True}
 
 
+def resolve_dns_entity(entity_id: str | None) -> str | None:
+    """Een leeg veld is toegestaan; een ingevuld veld moet bestaan.
+
+    Zonder deze controle sloeg de foreign key op dns_records.entity_id pas toe
+    tijdens de INSERT en gaf dat een kale 500 op iets wat gewoon een 404 hoort
+    te zijn."""
+    entity_id = (entity_id or "").strip() or None
+    if entity_id and not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Gekoppeld device niet gevonden")
+    return entity_id
+
+
 @app.post("/api/dns-records")
 def dns_record_create(payload: DnsRecordInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    entity_id = resolve_dns_entity(payload.entity_id)
     record_id = str(uuid.uuid4())
     now = utcnow()
     with database.transaction() as connection:
@@ -1916,7 +1929,7 @@ def dns_record_create(payload: DnsRecordInput, auth: AuthContext = Depends(write
                (id,name,record_type,value,ttl,enabled,source,entity_id,manual_locked,created_at,updated_at)
                VALUES(?,?,?,?,?,?,'manual',?,1,?,?)""",
             (record_id, payload.name.rstrip("."), payload.record_type, payload.value, payload.ttl,
-             int(payload.enabled), payload.entity_id, now, now),
+             int(payload.enabled), entity_id, now, now),
         )
     database.audit(auth.user_id, "dns.create", "dns_record", record_id, payload.model_dump())
     return database.fetch_one("SELECT * FROM dns_records WHERE id=?", (record_id,))
@@ -1929,12 +1942,13 @@ def dns_record_update(record_id: str, payload: DnsRecordInput, auth: AuthContext
         raise HTTPException(404, "DNS-record niet gevonden")
     if record["source"] != "manual":
         raise HTTPException(409, "Een geïmporteerd record wijzig je in AdGuard Home")
+    entity_id = resolve_dns_entity(payload.entity_id)
     with database.transaction() as connection:
         cursor = connection.execute(
             """UPDATE dns_records SET name=?,record_type=?,value=?,ttl=?,enabled=?,entity_id=?,
                manual_locked=1,updated_at=? WHERE id=?""",
             (payload.name.rstrip("."), payload.record_type, payload.value, payload.ttl,
-             int(payload.enabled), payload.entity_id, utcnow(), record_id),
+             int(payload.enabled), entity_id, utcnow(), record_id),
         )
         if cursor.rowcount == 0:
             raise HTTPException(404, "DNS-record niet gevonden")
