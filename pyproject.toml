@@ -2,4 +2,7 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
-markers = ["no_admin: start deze test zonder aangemaakte beheerder"]
+markers = [
+  "no_admin: start deze test zonder aangemaakte beheerder",
+  "e2e: draait de app in een echte browser (vereist Playwright)",
+]

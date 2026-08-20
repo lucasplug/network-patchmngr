@@ -171,6 +171,18 @@ Tests:
 .venv/bin/pytest -q
 ```
 
+Er is ook een end-to-end test die de app in een echte browser doorklikt. Die
+controleert per scenario of iets ook weer *ongedaan* te maken is: een device
+koppelen én loskoppelen, een knoop verbergen én terughalen, een device
+aanmaken én weggooien. Losse endpointtests zagen dat soort halve wegen niet.
+
+```bash
+.venv/bin/pip install playwright && .venv/bin/playwright install chromium
+.venv/bin/pytest tests/test_e2e_browser.py -q
+```
+
+Zonder Playwright slaat pytest dat bestand over.
+
 ## Datamodel
 
 - `physical_devices`, `ports` en `port_assignments`: handmatige fysieke waarheid.

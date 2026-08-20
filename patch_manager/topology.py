@@ -186,6 +186,8 @@ def topology_payload(database: Database) -> dict[str, Any]:
     sync_topology_catalog(database)
     # Een netwerkapparaat heeft geen eigen status; het leent die van de
     # observatie die erover gaat (monitor_entity_id). Vandaar de tweede join.
+    # Verborgen knopen komen wél mee: de frontend filtert ze weg, en anders is
+    # verbergen een deur die alleen dichtgaat.
     nodes = database.fetch_all(
         """SELECT n.*,
                   COALESCE(e.status, m.status) AS status,
@@ -198,7 +200,7 @@ def topology_payload(database: Database) -> dict[str, Any]:
            LEFT JOIN physical_devices d
              ON n.reference_type='physical' AND d.id=n.reference_id
            LEFT JOIN entities m ON m.id=d.monitor_entity_id
-           WHERE n.hidden=0 ORDER BY n.created_at"""
+           ORDER BY n.created_at"""
     )
     metrics = entity_metrics(database)
     for node in nodes:

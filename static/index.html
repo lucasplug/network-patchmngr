@@ -78,6 +78,7 @@
         <aside class="unpatched-panel glass" id="unpatched-drop">
           <div class="side-title">Nog te koppelen <span class="muted" id="unpatched-count"></span></div>
           <p class="muted tiny">Sleep een device op een poort. Sleep een kabel hierheen om los te koppelen, of klik een device om een poort te kiezen.</p>
+          <p id="pending-link" class="pending-link hidden"></p>
           <div id="unpatched-list" class="chip-list"></div>
         </aside>
       </div>
@@ -100,6 +101,7 @@
           <label><input type="checkbox" data-layer="physical" checked> fysiek</label>
           <label><input type="checkbox" data-layer="virtual" checked> virtueel</label>
           <label><input type="checkbox" data-layer="services" checked> services</label>
+          <label><input type="checkbox" data-layer="hidden"> verborgen <b id="hidden-count" class="badge hidden">0</b></label>
         </div><button class="button" id="topology-edit">Bewerken</button></div>
       </div>
       <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button class="button hidden" id="group-selection">Selectie groeperen</button><button class="button" id="topology-undo">↶ Ongedaan</button><button class="button" id="add-group">+ Groep</button><button class="button" id="add-relation">+ Relatie</button><button class="button" id="reset-layout">Auto-indeling</button><button class="button primary" id="finish-edit">Klaar</button></div></div>
@@ -234,7 +236,9 @@
       <input type="hidden" name="node_id"><label>Label<input name="label" required></label><label>Subtitel<input name="subtitle"></label>
       <div class="field-row"><label>Parent/groep<select name="parent_node_id"><option value="">Geen parent</option></select></label><label>Levenscyclus<select name="lifecycle"><option value="active">Actief</option><option value="planned">Gepland</option><option value="phase_out">Uitfaseren</option></select></label></div>
       <label class="toggle-label compact"><input name="collapsed" type="checkbox"><span>Groep ingeklapt tonen</span></label>
-      <div class="modal-actions"><button type="button" class="button danger hidden" id="delete-topology-group">Groep verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
+      <label class="toggle-label compact"><input name="hidden" type="checkbox"><span>Verbergen in de topologie</span></label>
+      <p class="muted tiny">Een apparaat verwijder je in de patchview; de topologie is een weergave daarvan. Verbergen haalt het hier weg zonder iets te wissen — met de laag <em>verborgen</em> zet je het terug.</p>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="delete-topology-group">Groep verwijderen</button><button type="button" class="button hidden" id="open-topology-source">Apparaat bewerken…</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
     </form>
   </dialog>
 

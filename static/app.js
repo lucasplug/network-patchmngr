@@ -220,6 +220,13 @@ function renderUnpatched() {
     !linked.has(entity.id) && !entity.archived && canAttach(entity.type)
     && !entity.uplink_device_id && !placed.has(entity.id));
   $("#unpatched-count").textContent = `${free.length} vrij`;
+  // Een lopende "kies een poort"-actie hoort zichtbaar en opzegbaar te zijn.
+  // Eerder verdween hij stil zodra je de lade sloot zonder op te slaan.
+  const pending = state.pendingEntityId && state.data.entities.find(item => item.id === state.pendingEntityId);
+  $("#pending-link").innerHTML = pending
+    ? `Kies een poort voor <strong>${esc(pending.name)}</strong> <button class="button micro" id="cancel-pending">Annuleren</button>`
+    : "";
+  $("#pending-link").classList.toggle("hidden", !pending);
   $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
     <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
       ${statusDot(entity.status)}<span>${esc(entity.name)}</span><small>${esc(entity.vendor || entity.ip_address || categoryLabel(entity.type))}</small>
@@ -307,7 +314,13 @@ function renderTopology() {
   const svg = $("#topology-canvas");
   const nodes = state.data.topology?.nodes || [];
   const relations = state.data.topology?.relations || [];
-  const visible = nodes.filter(node => !node.hidden);
+  // Verborgen knopen komen mee uit de backend; de laag bepaalt of je ze ziet.
+  // Anders zou verbergen een deur zijn die alleen dichtgaat.
+  const showHidden = $('[data-layer="hidden"]').checked;
+  const hiddenCount = nodes.filter(node => node.hidden).length;
+  $("#hidden-count").textContent = hiddenCount;
+  $("#hidden-count").classList.toggle("hidden", hiddenCount === 0);
+  const visible = nodes.filter(node => showHidden || !node.hidden);
   const byId = new Map(visible.map(node => [node.id, node]));
   const children = new Map();
   visible.forEach(node => {
@@ -486,6 +499,7 @@ function switchTab(tab) {
   state.activeTab = tab;
   $$(".tab").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
   $$(".view").forEach(view => view.classList.toggle("active", view.id === `${tab}-view`));
+  if (tab === "patch") renderPatch();
   if (tab === "topology") renderTopology();
   if (tab === "apps") renderApps();
   if (tab === "admin") renderChanges();
@@ -508,7 +522,9 @@ function openPort(portId, deviceId) {
   form.elements.entity_id.value = state.pendingEntityId || (port.link_kind === "entity" ? port.entity_id : "") || "";
   form.elements.b_port_id.innerHTML = `<option value="">Geen doorverbinding</option>${freePorts(port).map(item => `<option value="${item.id}">${esc(item.display)}</option>`).join("")}`;
   form.elements.b_port_id.value = port.link_kind === "port" ? (port.target_port_id || "") : "";
-  state.pendingEntityId = null;
+  // De keuze pas loslaten als hij is opgeslagen. Hem hier wissen betekende dat
+  // je na "Kies de fysieke poort" één verkeerde klik nodig had om je bedoeling
+  // stilletjes kwijt te raken.
   $("#disconnect-port").classList.toggle("hidden", !port.cable_id);
   renderTrace(port);
   $("#drawer-backdrop").classList.remove("hidden");
@@ -872,8 +888,17 @@ function nodeOptions(selected="", exclude="") {
 function openTopologyNode(nodeId) {
   const node=state.data.topology.nodes.find(item=>item.id===nodeId); if(!node)return;
   const form=$("#topology-node-form"); form.elements.node_id.value=node.id; form.elements.label.value=node.label; form.elements.subtitle.value=node.subtitle||"";
+  form.elements.hidden.checked=Boolean(node.hidden);
   form.elements.parent_node_id.innerHTML=nodeOptions(node.parent_node_id||"",node.id); form.elements.lifecycle.value=node.lifecycle||"active"; form.elements.collapsed.checked=Boolean(node.collapsed);
   $("#delete-topology-group").classList.toggle("hidden",node.reference_type!=="group");
+  // Een knoop is een weergave van een device of netwerkapparaat; verwijderen
+  // doe je bij het ding zelf. Zonder deze knop was dat vanaf hier niet te
+  // vinden en leek de topologie een doodlopende straat.
+  const source=["entity","physical"].includes(node.reference_type)&&node.reference_id;
+  $("#open-topology-source").classList.toggle("hidden",!source);
+  $("#open-topology-source").textContent=node.reference_type==="physical"?"Netwerkapparaat bewerken…":"Device bewerken…";
+  $("#open-topology-source").dataset.kind=node.reference_type||"";
+  $("#open-topology-source").dataset.id=node.reference_id||"";
   $("#topology-node-dialog").showModal();
 }
 
@@ -1003,6 +1028,13 @@ $("#new-physical-button").addEventListener("click", () => openPhysical());
 $$('.modal-close').forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 $$('.drawer-close').forEach(button => button.addEventListener("click", closeDrawer));
 $("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#pending-link").addEventListener("click", event => {
+  if (!event.target.closest("#cancel-pending")) return;
+  state.pendingEntityId = null;
+  renderPatch();
+  toast("Koppelen geannuleerd");
+});
+
 $$('[data-layer]').forEach(input => input.addEventListener("change", renderTopology));
 
 $("#entity-form").addEventListener("submit", async event => {
@@ -1038,6 +1070,7 @@ $("#port-form").addEventListener("submit", async event => {
   try {
     if (payload.b_entity_id || payload.b_port_id) await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"PUT", body:JSON.stringify(payload)});
     else await api(`/api/ports/${encodeURIComponent(portId)}/cable`, {method:"DELETE"});
+    state.pendingEntityId = null;
     closeDrawer(); await loadData(true); toast(payload.b_entity_id || payload.b_port_id ? "Kabel opgeslagen" : "Poort vrijgemaakt");
   } catch(error){toast(error.message,"error");}
 });
@@ -1091,9 +1124,10 @@ $("#group-selection").addEventListener("click",()=>{state.groupSelected=true;$("
 $("#add-relation").addEventListener("click",prepareRelationDialog);
 $("#reset-layout").addEventListener("click",async()=>{try{await api("/api/topology/layout/reset",{method:"POST"});await loadData(true);toast("Automatische indeling hersteld");}catch(error){toast(error.message,"error");}});
 $("#topology-undo").addEventListener("click",async()=>{try{const result=await api("/api/topology/undo",{method:"POST"});state.selectedNodes.clear();await loadData(true);toast(`${result.undone} ongedaan gemaakt`);}catch(error){toast(error.message,"error");}});
-$("#topology-node-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),nodeId=payload.node_id;delete payload.node_id;payload.parent_node_id=payload.parent_node_id||null;payload.collapsed=form.elements.collapsed.checked;payload.hidden=false;try{await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Node opgeslagen");}catch(error){toast(error.message,"error");}});
+$("#topology-node-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),nodeId=payload.node_id;delete payload.node_id;payload.parent_node_id=payload.parent_node_id||null;payload.collapsed=form.elements.collapsed.checked;payload.hidden=form.elements.hidden.checked;try{await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Node opgeslagen");}catch(error){toast(error.message,"error");}});
 $("#topology-group-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.node_ids=state.groupSelected?[...state.selectedNodes]:[];try{await api("/api/topology/groups",{method:"POST",body:JSON.stringify(payload)});state.selectedNodes.clear();state.groupSelected=false;form.reset();form.closest("dialog").close();await loadData(true);toast(payload.node_ids.length?"Selectie gegroepeerd":"Groep toegevoegd");}catch(error){toast(error.message,"error");}});
 $("#topology-relation-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget;try{await api("/api/topology/relations",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();form.closest("dialog").close();await loadData(true);toast("Relatie toegevoegd");}catch(error){toast(error.message,"error");}});
+$("#open-topology-source").addEventListener("click",()=>{const button=$("#open-topology-source");$("#topology-node-dialog").close();if(button.dataset.kind==="physical")openPhysical(button.dataset.id);else openEntity(button.dataset.id);});
 $("#delete-topology-group").addEventListener("click",async()=>{const form=$("#topology-node-form"),node=state.data.topology.nodes.find(item=>item.id===form.elements.node_id.value);if(node&&confirm(`${node.label} verwijderen? Kinderen worden uit de groep gehaald.`)){try{await api(`/api/topology/groups/${encodeURIComponent(node.id)}?confirm=${encodeURIComponent(node.label)}`,{method:"DELETE"});form.closest("dialog").close();state.selectedNodes.delete(node.id);await loadData(true);toast("Groep verwijderd");}catch(error){toast(error.message,"error");}}});
 
 $("#new-dns-record").addEventListener("click",()=>openDns());
