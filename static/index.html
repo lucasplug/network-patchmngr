@@ -53,15 +53,15 @@
         <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
         <button class="icon-button" id="theme-toggle" title="Licht of donker" aria-label="Wissel tussen licht en donker">◐</button>
         <button class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
-        <button class="profile-button" id="logout-button"><span class="avatar" id="avatar">A</span><span id="username">admin</span></button>
+        <button class="profile-button" id="logout-button" title="Uitloggen" aria-label="Uitloggen"><span class="avatar" id="avatar">A</span><span id="username">admin</span><span class="logout-icon" aria-hidden="true">↪</span></button>
       </div>
     </header>
 
     <nav class="tabs" aria-label="Hoofdnavigatie">
-      <button class="tab active" data-tab="patch"><span class="tab-icon">⌁</span>Patch</button>
-      <button class="tab" data-tab="apps"><span class="tab-icon">▦</span>Apps</button>
-      <button class="tab" data-tab="topology"><span class="tab-icon">◇</span>Topologie</button>
-      <button class="tab" data-tab="admin"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
+      <button class="tab active" data-tab="patch" aria-controls="patch-view" aria-current="page"><span class="tab-icon">⌁</span>Patch</button>
+      <button class="tab" data-tab="apps" aria-controls="apps-view"><span class="tab-icon">▦</span>Apps</button>
+      <button class="tab" data-tab="topology" aria-controls="topology-view"><span class="tab-icon">◇</span>Topologie</button>
+      <button class="tab" data-tab="admin" aria-controls="admin-view"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
     </nav>
 
     <section id="patch-view" class="view active">
@@ -86,7 +86,7 @@
       <div id="manual-entities-list" class="data-list"></div>
     </section>
 
-    <section id="apps-view" class="view">
+    <section id="apps-view" class="view" aria-hidden="true">
       <div class="view-heading">
         <div><p class="eyebrow">Snelkoppelingen</p><h1>Apps</h1><p class="muted">Links naar je eigen diensten, met de status uit Uptime Kuma ernaast.</p></div>
         <div class="heading-actions"><button class="button primary" id="new-app-button">+ App</button></div>
@@ -94,7 +94,7 @@
       <div id="apps-grid" class="apps-grid"></div>
     </section>
 
-    <section id="topology-view" class="view">
+    <section id="topology-view" class="view" aria-hidden="true">
       <div class="view-heading compact">
         <div><p class="eyebrow">Live verrijking</p><h1>Netwerktopologie</h1><p class="muted">Fysieke patching vormt de basis; virtuele relaties worden als aparte laag getoond.</p></div>
         <div class="topology-actions"><div class="layer-controls" role="group" aria-label="Topologielagen">
@@ -107,6 +107,7 @@
       <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button class="button hidden" id="group-selection">Selectie groeperen</button><button class="button" id="topology-undo">↶ Ongedaan</button><button class="button" id="add-group">+ Groep</button><button class="button" id="add-relation">+ Relatie</button><button class="button" id="reset-layout">Auto-indeling</button><button class="button primary" id="finish-edit">Klaar</button></div></div>
       <div class="topology-card glass">
         <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><div class="zoom-controls"><button class="icon-button" id="zoom-out" aria-label="Uitzoomen">−</button><span id="zoom-level" class="muted">100%</span><button class="icon-button" id="zoom-in" aria-label="Inzoomen">+</button><button class="button micro" id="zoom-reset">Passend</button></div></div>
+        <p class="topology-mobile-hint muted tiny">Sleep in de kaart om andere delen te bekijken. Kies <strong>Passend</strong> om het hele netwerk in beeld te brengen.</p>
         <div class="topology-scroll"><svg id="topology-canvas" viewBox="0 0 1200 760" role="img" aria-label="Netwerktopologie"></svg></div>
       </div>
       <div class="speed-history-card glass" id="speed-history-card">
@@ -116,7 +117,7 @@
       </div>
     </section>
 
-    <section id="admin-view" class="view">
+    <section id="admin-view" class="view" aria-hidden="true">
       <div class="view-heading"><div><p class="eyebrow">Configuratie & controle</p><h1>Admin</h1><p class="muted">Providers verrijken de inventaris zonder handmatige patchvelden te overschrijven.</p></div><div class="heading-actions"><button class="button" id="config-import-button">Config importeren</button><button class="button" id="config-export">Config exporteren</button><button class="button" id="backup-now">Back-up nu</button><input class="hidden" id="config-import-file" type="file" accept="application/json,.json"><input class="hidden" id="backup-import-file" type="file" accept=".pmbackup,.db,application/zip,application/vnd.sqlite3"></div></div>
       <div class="admin-grid">
         <section class="admin-main">
@@ -151,7 +152,7 @@
   </div>
 
   <div id="drawer-backdrop" class="backdrop hidden"></div>
-  <aside id="port-drawer" class="drawer" aria-hidden="true">
+  <aside id="port-drawer" class="drawer" aria-hidden="true" inert>
     <div class="drawer-head"><div><p class="eyebrow">Fysieke poort</p><h2 id="drawer-title">Poort</h2></div><button class="icon-button drawer-close" aria-label="Sluiten">×</button></div>
     <form id="port-form" class="stack">
       <input type="hidden" name="port_id">
@@ -200,10 +201,16 @@
         <div id="endpoint-rows" class="stack"></div>
         <p class="muted tiny">Eén regel per machine waar Glances draait. Kies per endpoint welk device het meet; op hostnaam matchen leverde dubbele hosts op.</p>
       </div>
-      <label>Configuratie (JSON)<textarea class="code-input" name="config" rows="14" spellcheck="false"></textarea></label>
+      <div id="provider-config-fields" class="stack"></div>
+      <details id="provider-advanced-config" class="advanced-config">
+        <summary>Geavanceerde JSON-configuratie</summary>
+        <label>Configuratie (JSON)<textarea class="code-input" name="config" rows="10" spellcheck="false"></textarea></label>
+        <p class="muted tiny">Alleen nodig voor niet-standaard opties. De velden hierboven blijven leidend.</p>
+      </details>
       <div id="provider-credentials" class="stack"></div>
       <p class="muted tiny">Gegevens worden versleuteld opgeslagen. Laat een veld leeg om de bestaande waarde te behouden.</p>
-      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
+      <p id="provider-test-result" class="form-feedback" aria-live="polite"></p>
+      <div class="modal-actions"><button type="button" class="button" id="provider-test">Verbinding testen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Configuratie opslaan</button></div>
     </form>
   </dialog>
 
@@ -270,7 +277,7 @@
   <dialog id="mapping-dialog" class="modal glass"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2>Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
 
   <div id="entity-drawer-backdrop" class="backdrop hidden"></div>
-  <aside id="entity-drawer" class="drawer" aria-hidden="true">
+  <aside id="entity-drawer" class="drawer" aria-hidden="true" inert>
     <div class="drawer-head">
       <div><p class="eyebrow">Device</p><h2 id="entity-drawer-title">Device</h2><p class="muted tiny" id="entity-drawer-sub"></p></div>
       <button class="icon-button drawer-close" aria-label="Sluiten">×</button>

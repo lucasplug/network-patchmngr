@@ -1,10 +1,53 @@
 const state = { data: null, csrf: null, setupRequired: false, activeTab: "patch", pendingEntityId: null, editingTopology: false, topologyPositions: new Map(), selectedNodes: new Set(), groupSelected: false };
+let portDrawerReturnFocus = null;
+let entityDrawerReturnFocus = null;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value = "") => String(value).replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const formatTime = value => value ? new Intl.DateTimeFormat("nl-NL", {day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}).format(new Date(value)) : "nog nooit";
 const formatBytes = bytes => bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+
+const PROVIDER_TYPE_LABELS = {
+  adguard: "DNS en netwerkclients",
+  dhcp_arp: "Netwerkdetectie",
+  glances: "Systeemmetingen",
+  nginx_proxy_manager: "Reverse proxy",
+  portainer: "Containers",
+  proxmox: "Virtualisatie",
+  uptime_kuma: "Beschikbaarheid",
+};
+
+const PROVIDER_CONFIG_UI = {
+  dhcp_arp: [
+    {key:"subnets", label:"Te scannen subnetten", kind:"list", placeholder:"192.168.1.0/24", help:"Komma-gescheiden. Ieder subnet moet binnen PATCH_TRUSTED_SUBNETS vallen en mag maximaal 1024 adressen bevatten."},
+    {key:"scan", label:"Naast de ARP-tabel ook actief pingen", kind:"boolean"},
+  ],
+  uptime_kuma: [
+    {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://kuma.home.arpa"},
+    {key:"status_page_slug", label:"Statuspagina-slug", kind:"text", placeholder:"homelab", help:"Het laatste deel van de publieke statuspagina-URL."},
+  ],
+  portainer: [
+    {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://portainer.home.arpa"},
+    {key:"verify_tls", label:"TLS-certificaat controleren", kind:"boolean"},
+  ],
+  proxmox: [
+    {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://proxmox.home.arpa:8006"},
+    {key:"user", label:"Gebruiker (user@realm)", kind:"text", placeholder:"readonly@pve"},
+    {key:"token_name", label:"Token-ID", kind:"text", placeholder:"patchmanager"},
+    {key:"verify_tls", label:"TLS-certificaat controleren", kind:"boolean"},
+  ],
+  adguard: [
+    {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://adguard.home.arpa"},
+    {key:"import_clients", label:"Netwerkclients importeren", kind:"boolean"},
+    {key:"import_rewrites", label:"DNS-rewrites importeren", kind:"boolean"},
+    {key:"verify_tls", label:"TLS-certificaat controleren", kind:"boolean"},
+  ],
+  nginx_proxy_manager: [
+    {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://npm.home.arpa"},
+    {key:"verify_tls", label:"TLS-certificaat controleren", kind:"boolean"},
+  ],
+};
 
 function applyBranding(settings = {}) {
   const title = settings.title || "Network Patch Manager";
@@ -75,6 +118,7 @@ async function initialize() {
       state.csrf = auth.csrf_token;
       $("#username").textContent = auth.username;
       $("#avatar").textContent = auth.username.slice(0, 1).toUpperCase();
+      $("#logout-button").setAttribute("aria-label", `Uitloggen als ${auth.username}`);
       await showApp();
     } else showAuth(auth.setup_required);
   } catch (error) {
@@ -168,7 +212,7 @@ function statusDot(status) { return `<i class="status-dot ${["up","down","degrad
 function renderSummary() {
   const c = state.data.counts;
   $("#summary-chips").innerHTML = [
-    [`${c.patched}/${c.ports}`, "poorten gepatcht", ""],
+    [`${c.patched}`, "kabels vastgelegd", ""],
     [c.up, "devices up", "up"],
     [c.down, "devices down", "down"],
     [c.unlinked, "ongekoppeld", "unknown"],
@@ -467,7 +511,7 @@ function renderAdmin() {
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
-      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "gereed") : "uit"}</span></div>
+      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(PROVIDER_TYPE_LABELS[provider.type] || provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "gereed") : "uit"}</span></div>
       <div class="provider-details"><div><span>Laatste succes</span><b>${formatTime(provider.last_success_at)}</b></div><div><span>Interval</span><b>${provider.poll_interval_seconds}s</b></div></div>
       ${provider.last_error ? `<p class="form-error tiny" title="${esc(provider.last_error)}">${esc(shorten(provider.last_error, 62))}</p>` : ""}
       <div class="provider-actions"><button class="button" data-provider-edit="${provider.id}">Configureren</button><button class="button" data-provider-sync="${provider.id}">Nu ophalen</button>${
@@ -537,8 +581,17 @@ function renderSpeedtest() {
 
 function switchTab(tab) {
   state.activeTab = tab;
-  $$(".tab").forEach(item => item.classList.toggle("active", item.dataset.tab === tab));
-  $$(".view").forEach(view => view.classList.toggle("active", view.id === `${tab}-view`));
+  $$(".tab").forEach(item => {
+    const active = item.dataset.tab === tab;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  $$(".view").forEach(view => {
+    const active = view.id === `${tab}-view`;
+    view.classList.toggle("active", active);
+    view.setAttribute("aria-hidden", String(!active));
+  });
   if (tab === "patch") renderPatch();
   if (tab === "topology") renderTopology();
   if (tab === "apps") renderApps();
@@ -567,9 +620,13 @@ function openPort(portId, deviceId) {
   // stilletjes kwijt te raken.
   $("#disconnect-port").classList.toggle("hidden", !port.cable_id);
   renderTrace(port);
+  const drawer = $("#port-drawer");
+  portDrawerReturnFocus = document.activeElement;
   $("#drawer-backdrop").classList.remove("hidden");
-  $("#port-drawer").classList.add("open");
-  $("#port-drawer").setAttribute("aria-hidden", "false");
+  drawer.removeAttribute("inert");
+  drawer.classList.add("open");
+  drawer.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("#port-drawer .drawer-close").focus());
 }
 
 // Devices die nog vrij zijn (of aan déze poort hangen); virtuele objecten
@@ -600,8 +657,13 @@ async function renderTrace(port) {
 
 function closeDrawer() {
   $("#drawer-backdrop").classList.add("hidden");
-  $("#port-drawer").classList.remove("open");
-  $("#port-drawer").setAttribute("aria-hidden", "true");
+  const drawer = $("#port-drawer");
+  drawer.classList.remove("open");
+  drawer.setAttribute("aria-hidden", "true");
+  drawer.setAttribute("inert", "");
+  const target = portDrawerReturnFocus;
+  portDrawerReturnFocus = null;
+  if (target?.isConnected) requestAnimationFrame(() => target.focus());
 }
 
 /* --------------------------------------------------------------- zoeken */
@@ -789,6 +851,49 @@ $("#app-delete").addEventListener("click", async () => {
   } catch (error) { toast(error.message, "error"); }
 });
 
+function providerConfigField(field, config) {
+  const value = config[field.key];
+  if (field.kind === "boolean") {
+    return `<div><label class="toggle-label compact"><input type="checkbox" data-provider-config="${esc(field.key)}" data-provider-config-kind="boolean"${value ? " checked" : ""}><span>${esc(field.label)}</span></label>${field.help ? `<p class="config-help">${esc(field.help)}</p>` : ""}</div>`;
+  }
+  const displayed = field.kind === "list" ? (Array.isArray(value) ? value.join(", ") : "") : (value ?? "");
+  const type = field.kind === "url" ? "url" : "text";
+  return `<label>${esc(field.label)}<input type="${type}" data-provider-config="${esc(field.key)}" data-provider-config-kind="${esc(field.kind)}" value="${esc(displayed)}" placeholder="${esc(field.placeholder || "")}">${field.help ? `<small class="config-help">${esc(field.help)}</small>` : ""}</label>`;
+}
+
+function renderProviderConfig(provider) {
+  const fields = PROVIDER_CONFIG_UI[provider.type] || [];
+  $("#provider-config-fields").innerHTML = fields.length
+    ? `<div class="section-bar"><span>Verbindingsinstellingen</span></div>${fields.map(field => providerConfigField(field, provider.config)).join("")}`
+    : "";
+  $("#provider-advanced-config").open = false;
+  const result = $("#provider-test-result");
+  result.textContent = "";
+  result.className = "form-feedback";
+}
+
+function providerConfigFromForm(form) {
+  const config = JSON.parse(form.elements.config.value);
+  $$('[data-provider-config]', form).forEach(input => {
+    const kind = input.dataset.providerConfigKind;
+    if (kind === "boolean") config[input.dataset.providerConfig] = input.checked;
+    else if (kind === "list") config[input.dataset.providerConfig] = input.value.split(",").map(value => value.trim()).filter(Boolean);
+    else config[input.dataset.providerConfig] = input.value.trim();
+  });
+  if (!$("#provider-endpoints").classList.contains("hidden")) {
+    config.endpoints = readEndpointRows().filter(endpoint => endpoint.url);
+  }
+  return config;
+}
+
+function providerCredentialsFromForm(form) {
+  const credentials = {};
+  $$('[data-credential-key]', form).forEach(input => {
+    if (input.value.trim()) credentials[input.dataset.credentialKey] = input.value;
+  });
+  return credentials;
+}
+
 function openProvider(providerId) {
   const provider = state.data.providers.find(item => item.id === providerId);
   if (!provider) return;
@@ -799,8 +904,9 @@ function openProvider(providerId) {
   form.elements.enabled.checked = provider.enabled;
   form.elements.poll_interval_seconds.value = provider.poll_interval_seconds;
   form.elements.config.value = JSON.stringify(provider.config, null, 2);
+  renderProviderConfig(provider);
   // Glances draait op meerdere machines; die lijst met de hand in JSON typen
-  // is precies waar je een komma vergeet. De rest houdt het JSON-veld.
+  // is precies waar je een komma vergeet.
   $("#provider-endpoints").classList.toggle("hidden", provider.type !== "glances");
   if (provider.type === "glances") renderEndpointRows(provider.config.endpoints || []);
   $("#provider-credentials").innerHTML = (provider.credential_fields || []).length
@@ -859,7 +965,7 @@ $("#add-provider").addEventListener("click", () => {
   // adapter, en dus geen nut.
   const kinds = new Map(state.data.providers.map(item => [item.type, item]));
   $("#provider-add-type").innerHTML = [...kinds.values()]
-    .map(item => `<option value="${esc(item.type)}">${esc(item.name)} (${esc(item.type)})</option>`).join("");
+    .map(item => `<option value="${esc(item.type)}">${esc(item.name)} · ${esc(PROVIDER_TYPE_LABELS[item.type] || item.type)}</option>`).join("");
   $("#provider-add-form").reset();
   $("#provider-add-dialog").showModal();
 });
@@ -1076,6 +1182,7 @@ $("#auth-form").addEventListener("submit", async event => {
     state.csrf = result.csrf_token;
     $("#username").textContent = result.username;
     $("#avatar").textContent = result.username.slice(0,1).toUpperCase();
+    $("#logout-button").setAttribute("aria-label", `Uitloggen als ${result.username}`);
     element.reset();
     await showApp();
   } catch (error) { $("#auth-error").textContent = error.message; }
@@ -1086,7 +1193,7 @@ $("#refresh-button").addEventListener("click", () => loadData());
 $("#new-entity-button").addEventListener("click", () => openEntity());
 $("#new-physical-button").addEventListener("click", () => openPhysical());
 $$('.modal-close').forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
-$$('.drawer-close').forEach(button => button.addEventListener("click", closeDrawer));
+$$("#port-drawer .drawer-close").forEach(button => button.addEventListener("click", closeDrawer));
 $("#drawer-backdrop").addEventListener("click", closeDrawer);
 $("#pending-link").addEventListener("click", event => {
   if (!event.target.closest("#cancel-pending")) return;
@@ -1143,18 +1250,34 @@ $("#disconnect-port").addEventListener("click", async () => {
 $("#provider-form").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget;
   try {
-    const config = JSON.parse(form.elements.config.value);
-    // De endpointrijen zijn leidend boven wat er in het JSON-veld staat: die
-    // rijen zijn wat je zojuist hebt zitten invullen.
-    if (!$("#provider-endpoints").classList.contains("hidden")) {
-      config.endpoints = readEndpointRows().filter(endpoint => endpoint.url);
-    }
-    const credentials = {};
-    $$('[data-credential-key]', form).forEach(input => { if (input.value.trim()) credentials[input.dataset.credentialKey] = input.value; });
+    const config = providerConfigFromForm(form);
+    const credentials = providerCredentialsFromForm(form);
     const clear_credentials = $$('[data-clear-credential]:checked', form).map(input => input.dataset.clearCredential);
     await api(`/api/providers/${form.elements.provider_id.value}`, {method:"PATCH", body:JSON.stringify({name:form.elements.name.value,enabled:form.elements.enabled.checked,poll_interval_seconds:Number(form.elements.poll_interval_seconds.value),config,credentials,clear_credentials})});
     $("#provider-dialog").close(); await loadData(true); toast("Providerconfiguratie opgeslagen");
   } catch(error){toast(error instanceof SyntaxError ? "Configuratie bevat ongeldige JSON" : error.message,"error");}
+});
+
+$("#provider-test").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  const form = $("#provider-form");
+  const result = $("#provider-test-result");
+  button.disabled = true;
+  result.className = "form-feedback";
+  result.textContent = "Verbinding wordt getest…";
+  try {
+    const response = await api(`/api/providers/${encodeURIComponent(form.elements.provider_id.value)}/test`, {
+      method:"POST",
+      body:JSON.stringify({config:providerConfigFromForm(form), credentials:providerCredentialsFromForm(form)}),
+    });
+    result.textContent = response.summary;
+    result.className = `form-feedback ${response.ok ? "ok" : "error"}`;
+  } catch (error) {
+    result.textContent = error instanceof SyntaxError ? "Configuratie bevat ongeldige JSON" : error.message;
+    result.className = "form-feedback error";
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $("#app-settings-form").addEventListener("submit", async event => {
@@ -1628,9 +1751,13 @@ async function openEntityDrawer(entityId) {
     ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
+  const drawer = $("#entity-drawer");
+  entityDrawerReturnFocus = document.activeElement;
   $("#entity-drawer-backdrop").classList.remove("hidden");
-  $("#entity-drawer").classList.add("open");
-  $("#entity-drawer").setAttribute("aria-hidden", "false");
+  drawer.removeAttribute("inert");
+  drawer.classList.add("open");
+  drawer.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => $("#entity-drawer .drawer-close").focus());
   try {
     const history = await api(`/api/entities/${encodeURIComponent(entityId)}/history`);
     const samples = history.samples;
@@ -1650,8 +1777,13 @@ async function openEntityDrawer(entityId) {
 
 function closeEntityDrawer() {
   $("#entity-drawer-backdrop").classList.add("hidden");
-  $("#entity-drawer").classList.remove("open");
-  $("#entity-drawer").setAttribute("aria-hidden", "true");
+  const drawer = $("#entity-drawer");
+  drawer.classList.remove("open");
+  drawer.setAttribute("aria-hidden", "true");
+  drawer.setAttribute("inert", "");
+  const target = entityDrawerReturnFocus;
+  entityDrawerReturnFocus = null;
+  if (target?.isConnected) requestAnimationFrame(() => target.focus());
 }
 
 $("#entity-drawer-backdrop").addEventListener("click", closeEntityDrawer);

@@ -159,6 +159,10 @@ Neem de volumes `patch-data` en `patch-backups` op in de normale Proxmox/VM-back
 
 ## Lokaal ontwikkelen
 
+Voor lokale ontwikkeling is **Python 3.11 of nieuwer** vereist. De Docker-image
+gebruikt Python 3.13. Controleer vóór het maken van de virtual environment met
+`python3 --version` dat niet per ongeluk de oudere systeem-Python wordt gebruikt.
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
