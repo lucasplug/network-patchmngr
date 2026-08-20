@@ -1,5 +1,8 @@
 # Network Patch Manager — functionele acceptatietest en code-reviewrapport 0.4.0
 
+> Vervolgrapport na merge en aanvullende UI/UX-hertest:
+> [FAT 0.4.0-R2](./functionele-acceptatietest-rapport-0.4.0-r2.md)
+
 > Oorspronkelijke uitkomst: **AFGEKEURD / niet releaseklaar**
 > Referentiecommit: `2a1afb3cae0d37bdd2abcc804299640d75d14bf1`
 > Uitgevoerd: 20 augustus 2026

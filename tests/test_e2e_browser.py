@@ -353,6 +353,75 @@ def test_escape_closes_every_overlay(page: Page) -> None:
     assert page.locator("#entity-dialog[open]").count() == 0
 
 
+def test_closed_drawers_are_inert_and_restore_keyboard_focus(page: Page) -> None:
+    """Een lade buiten beeld mag niet stiekem in de tabvolgorde blijven staan."""
+    tab(page, "patch")
+    drawer = page.locator("#port-drawer")
+    port = page.locator("[data-device-card] .port-face").first
+    assert drawer.get_attribute("inert") == ""
+    assert drawer.get_attribute("aria-hidden") == "true"
+
+    port.focus()
+    port.click()
+    settle(page)
+    assert drawer.get_attribute("inert") is None
+    assert drawer.get_attribute("aria-hidden") == "false"
+    assert page.locator("#port-drawer .drawer-close").evaluate(
+        "element => element === document.activeElement"
+    ), "De geopende lade hoort zelf de toetsenbordfocus te krijgen"
+
+    page.keyboard.press("Escape")
+    settle(page)
+    assert drawer.get_attribute("inert") == ""
+    assert port.evaluate("element => element === document.activeElement"), \
+        "Na sluiten hoort de focus terug te keren naar de gekozen poort"
+
+
+def test_navigation_and_logout_explain_their_current_action(page: Page) -> None:
+    """Navigatie en uitloggen mogen niet alleen uit kleur of een avatar blijken."""
+    summary = page.locator("#summary-chips").inner_text()
+    assert "kabels vastgelegd" in summary
+    assert "poorten gepatcht" not in summary
+    assert page.locator('[data-tab="patch"]').get_attribute("aria-current") == "page"
+    tab(page, "apps")
+    assert page.locator('[data-tab="patch"]').get_attribute("aria-current") is None
+    assert page.locator('[data-tab="apps"]').get_attribute("aria-current") == "page"
+    assert page.locator("#logout-button").get_attribute("aria-label").startswith("Uitloggen als ")
+
+
+def test_provider_configuration_has_guided_fields(page: Page) -> None:
+    """Een normale databron configureren hoort geen JSON-kennis te vereisen."""
+    tab(page, "admin")
+    card = page.locator(".provider-card", has_text="AdGuard Home")
+    card.locator("[data-provider-edit]").click()
+    expect(page.locator("#provider-dialog")).to_be_visible()
+    expect(page.locator('[data-provider-config="base_url"]')).to_be_visible()
+    expect(page.locator('[data-provider-config="import_clients"]')).to_be_visible()
+    expect(page.locator("#provider-test")).to_have_text("Verbinding testen")
+    assert not page.locator("#provider-advanced-config").evaluate("element => element.open")
+    assert not page.locator('#provider-form textarea[name="config"]').is_visible(), \
+        "De ruwe JSON hoort alleen als geavanceerde uitweg zichtbaar te zijn"
+
+
+def test_guided_provider_values_can_be_tested_and_saved(page: Page) -> None:
+    """De eenvoudige velden moeten echt naar de providerconfiguratie schrijven."""
+    tab(page, "admin")
+    card = page.locator(".provider-card", has_text="DHCP / ARP discovery")
+    card.locator("[data-provider-edit]").click()
+    page.fill('[data-provider-config="subnets"]', "127.0.0.0/30")
+    page.uncheck('[data-provider-config="scan"]')
+    page.click("#provider-test")
+    expect(page.locator("#provider-test-result")).to_have_class("form-feedback ok")
+    expect(page.locator("#provider-test-result")).to_contain_text("ARP-tabel")
+
+    page.click('#provider-form button[type="submit"]')
+    settle(page)
+    card = page.locator(".provider-card", has_text="DHCP / ARP discovery")
+    card.locator("[data-provider-edit]").click()
+    assert page.input_value('[data-provider-config="subnets"]') == "127.0.0.0/30"
+    assert not page.is_checked('[data-provider-config="scan"]')
+
+
 def test_every_tab_renders_without_errors(page: Page) -> None:
     """Doorklikken zonder JS-fout; de fixture bewaakt dat laatste."""
     for name in ("patch", "topology", "apps", "admin", "patch"):
@@ -429,6 +498,23 @@ def test_all_main_views_fit_a_phone_viewport(page: Page) -> None:
         })""")
         assert dimensions["document"] <= dimensions["viewport"], f"{name} maakt de pagina te breed: {dimensions}"
         assert dimensions["body"] <= dimensions["viewport"], f"{name} maakt de body te breed: {dimensions}"
+
+
+def test_admin_primary_actions_remain_readable_on_a_phone(page: Page) -> None:
+    """Geen drie desktopknoppen samenpersen tot nauwelijks leesbare labels."""
+    page.set_viewport_size({"width": 390, "height": 844})
+    tab(page, "admin")
+    actions = page.locator("#admin-view .section-bar > .row-actions .button")
+    assert actions.count() == 3
+    for index in range(actions.count()):
+        dimensions = actions.nth(index).evaluate("""element => ({
+          width: element.getBoundingClientRect().width,
+          height: element.getBoundingClientRect().height,
+          fontSize: parseFloat(getComputedStyle(element).fontSize)
+        })""")
+        assert dimensions["width"] >= 300, dimensions
+        assert dimensions["height"] >= 36, dimensions
+        assert dimensions["fontSize"] >= 10, dimensions
 
 
 def test_speedtest_dialog_offers_the_full_supported_interval_range(page: Page) -> None:

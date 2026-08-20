@@ -4,7 +4,8 @@
 > Applicatieversie: **0.4.0**
 > Referentiecommit: `2a1afb3cae0d37bdd2abcc804299640d75d14bf1`
 > Opgesteld: 20 augustus 2026
-> Resultaten: [functionele-acceptatietest-rapport-0.4.0.md](./functionele-acceptatietest-rapport-0.4.0.md)
+> Oorspronkelijke resultaten: [functionele-acceptatietest-rapport-0.4.0.md](./functionele-acceptatietest-rapport-0.4.0.md)<br>
+> Laatste post-mergehertest: [functionele-acceptatietest-rapport-0.4.0-r2.md](./functionele-acceptatietest-rapport-0.4.0-r2.md)
 
 ## 1. Doel en afbakening
 
