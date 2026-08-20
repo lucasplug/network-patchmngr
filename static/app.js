@@ -135,7 +135,9 @@ function renderAll() {
   renderApps();
   renderTopology();
   renderAdmin();
-  renderChanges();
+  // Alleen ophalen als het paneel ook zichtbaar is: dit draait ook op de
+  // poll van elke 30 seconden, en dan is het een verzoek om niets.
+  if (state.activeTab === "admin") renderChanges();
   renderSpeedtest();
 }
 
@@ -486,6 +488,7 @@ function switchTab(tab) {
   $$(".view").forEach(view => view.classList.toggle("active", view.id === `${tab}-view`));
   if (tab === "topology") renderTopology();
   if (tab === "apps") renderApps();
+  if (tab === "admin") renderChanges();
 }
 
 function openPort(portId, deviceId) {
@@ -590,6 +593,16 @@ document.addEventListener("click", event => {
   if (!event.target.closest(".search-box")) $("#search-results").classList.add("hidden");
 });
 
+// Een <dialog> sluit vanzelf met Escape; de lades zijn gewone divs met een
+// backdrop die de hele interface blokkeert. Zonder dit zit je vast tot je de
+// juiste × vindt.
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("#search-results").classList.contains("hidden")) { $("#search-results").classList.add("hidden"); return; }
+  if ($("#entity-drawer")?.classList.contains("open")) { closeEntityDrawer(); return; }
+  if ($("#port-drawer")?.classList.contains("open")) closeDrawer();
+});
+
 /* ------------------------------------------------- recente veranderingen */
 // De auditlog zegt wat jíj deed; dit zegt wat het netwerk deed.
 async function renderChanges() {
@@ -602,7 +615,7 @@ async function renderChanges() {
           <div><strong>${esc(item.name)}</strong><span>${esc(categoryLabel(item.type))}${item.vendor ? ` · ${esc(item.vendor)}` : ""}</span></div></div>
         <div><span class="data-cell-label">${kind === "new" ? "Verschenen" : "Laatst gezien"}</span><br>${formatTime(kind === "new" ? item.first_seen_at : item.last_seen_at)}</div>
         <div>${esc(item.ip_address || item.mac_address || "—")}</div>
-        <div><span class="pill ${kind === "new" ? "new" : "gone"}">${kind === "new" ? "nieuw" : "weg"}</span></div>
+        <div><span class="change-pill ${kind === "new" ? "new" : "gone"}">${kind === "new" ? "nieuw" : "weg"}</span></div>
       </div>`;
     const parts = [...data.appeared.map(item => row(item, "new")), ...data.vanished.map(item => row(item, "gone"))];
     $("#changes-list").innerHTML = parts.length ? parts.join("") : `<div class="empty-state">Niets veranderd in deze periode.</div>`;
@@ -1151,11 +1164,17 @@ async function runScan() {
   $("#wizard-scan-state").textContent = "bezig met scannen…";
   // Tijdens de scan verschijnen resultaten al: elke vondst wordt los opgeslagen.
   const ticker = setInterval(() => renderScanResults(), 2000);
+  // Zoek de bron op type, niet op een vast id: bronnen zijn instanties geworden
+  // en die van jou kan anders heten. En werk zijn configuratie bij in plaats van
+  // hem te vervangen, anders zet een scan je pollinterval terug op de standaard.
+  const arp = state.data.providers.find(item => item.type === "dhcp_arp");
+  if (!arp) { $("#wizard-scan-state").textContent = "Geen DHCP/ARP-bron gevonden"; button.disabled = false; clearInterval(ticker); return; }
   try {
-    await api("/api/providers/dhcp-arp", {method:"PATCH", body:JSON.stringify({
-      enabled: true, poll_interval_seconds: 300, config: {subnets, scan: subnets.length > 0}, credentials: {},
+    await api(`/api/providers/${encodeURIComponent(arp.id)}`, {method:"PATCH", body:JSON.stringify({
+      name: arp.name, enabled: true, poll_interval_seconds: arp.poll_interval_seconds,
+      config: {...arp.config, subnets, scan: subnets.length > 0}, credentials: {},
     })});
-    const result = await api("/api/providers/dhcp-arp/sync", {method:"POST"});
+    const result = await api(`/api/providers/${encodeURIComponent(arp.id)}/sync`, {method:"POST"});
     $("#wizard-scan-state").textContent = `${result.records} apparaten gevonden`;
   } catch (error) {
     $("#wizard-scan-state").textContent = error.message;

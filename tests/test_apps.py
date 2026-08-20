@@ -211,3 +211,21 @@ def test_csv_import_refuses_a_file_without_a_header() -> None:
             files={"file": ("d.csv", "192.168.1.1,iets\n", "text/csv")},
         )
         assert response.status_code == 422
+
+
+def test_a_csv_that_is_too_large_is_refused_not_silently_truncated() -> None:
+    """Afkappen sneed een regel doormidden en liet duizenden apparaten vallen."""
+    from patch_manager.main import CSV_MAX_BYTES
+    rows = ["name,type"] + [f"apparaat-{i},device" for i in range(60000)]
+    big = "\n".join(rows)
+    assert len(big) > CSV_MAX_BYTES, "testbestand is niet groot genoeg om iets te bewijzen"
+    with TestClient(app) as client:
+        headers = login(client)
+        response = client.post(
+            "/api/entities/import-csv", headers=headers,
+            files={"file": ("groot.csv", big, "text/csv")},
+        )
+        assert response.status_code == 413
+        assert "groter dan" in response.json()["detail"]
+        # En er is niets half geïmporteerd.
+        assert database.fetch_one("SELECT id FROM entities WHERE name='apparaat-0'") is None

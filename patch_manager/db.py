@@ -393,15 +393,23 @@ def _migration_002(connection: sqlite3.Connection) -> None:
         for row in connection.execute("PRAGMA index_list(providers)")
     )
     if unique_type:
-        connection.execute("ALTER TABLE providers RENAME TO providers_old")
-        connection.executescript(PROVIDERS_TABLE)
+        # Niet hernoemen-en-terugzetten: SQLite herschrijft bij een RENAME de
+        # foreign keys van provider_secrets, provider_records, observations en
+        # conflicts mee naar de oude naam, en DROP TABLE veegt hun rijen dan
+        # via ON DELETE CASCADE weg. De gedocumenteerde route bouwt de nieuwe
+        # tabel onder een eigen naam op; naar `providers_new` verwijst niets,
+        # dus het hernoemen daarvan raakt geen enkele andere tabel.
         connection.execute(
-            """INSERT INTO providers(id,type,name,enabled,poll_interval_seconds,config_json,
-                                     last_run_at,last_success_at,last_error,updated_at)
-               SELECT id,type,name,enabled,poll_interval_seconds,config_json,
-                      last_run_at,last_success_at,last_error,updated_at FROM providers_old"""
+            PROVIDERS_TABLE.replace("IF NOT EXISTS providers", "providers_new").strip().rstrip(";")
         )
-        connection.execute("DROP TABLE providers_old")
+        connection.execute(
+            """INSERT INTO providers_new(id,type,name,enabled,poll_interval_seconds,config_json,
+                                         last_run_at,last_success_at,last_error,updated_at)
+               SELECT id,type,name,enabled,poll_interval_seconds,config_json,
+                      last_run_at,last_success_at,last_error,updated_at FROM providers"""
+        )
+        connection.execute("DROP TABLE providers")
+        connection.execute("ALTER TABLE providers_new RENAME TO providers")
 
     # De inventarisseed draait alleen bij een lege installatie, dus een
     # bestaande database krijgt de ONT hier.
@@ -471,12 +479,8 @@ class Database:
             connection.close()
 
     def initialize(self) -> None:
+        self._apply_schema_and_migrations()
         with self.transaction() as connection:
-            fresh = connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-            ).fetchone()[0] == 0
-            connection.executescript(SCHEMA)
-            self._migrate(connection, fresh)
             inventory_seeded = connection.execute(
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()
@@ -499,6 +503,43 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO app_meta(key,value) VALUES('app_title','Network Patch Manager')"
             )
+
+    def _apply_schema_and_migrations(self) -> None:
+        """Schema aanmaken en de database naar SCHEMA_VERSION brengen.
+
+        Dit gebeurt op een eigen verbinding met autocommit, omdat een migratie
+        een tabel kan moeten herbouwen. Daarvoor moet `foreign_keys` uit, en die
+        pragma is een no-op zolang er een transactie loopt. Wat er wél omheen
+        zit is een expliciete BEGIN, plus een `foreign_key_check` achteraf: een
+        halve migratie is erger dan geen.
+        """
+        connection = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.isolation_level = None
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            fresh = connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0] == 0
+            # SCHEMA zet zelf foreign_keys=ON; daarna staan we weer buiten een
+            # transactie, dus pas hier kan de pragma uit.
+            connection.executescript(SCHEMA)
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._migrate(connection, fresh)
+                broken = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if broken:
+                    raise RuntimeError(
+                        f"Migratie liet kapotte verwijzingen achter: {[tuple(row) for row in broken[:3]]}"
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("PRAGMA foreign_keys=ON")
+        finally:
+            connection.close()
 
     def _migrate(self, connection: sqlite3.Connection, fresh: bool) -> None:
         """Breng een bestaande database naar de huidige SCHEMA_VERSION.

@@ -18,6 +18,12 @@ issue-tracker — één regel per punt volstaat.
 | 10 | Graag een licht thema | De CSS had een tokenblok, maar 121 harde kleuren daarbuiten — waaronder donkere vlakken en lichte tekstkleuren | Alle overlays via `--tint`, vlakken en merkkleuren naar tokens; licht thema is nu één `[data-theme="light"]`-blok |
 | 11 | Een pagina zoals Homarr: links naar apps met status uit Uptime Kuma | Bestond niet | Tabblad **Apps** met tegels per groep; status via dezelfde monitorkoppeling als netwerkapparaten |
 | 12 | Kan de DHCP/ARP-scan beter? | Drie dingen: niets werd ooit op `down` gezet, de reverse lookups liepen serieel (200 apparaten x 2s > het pollinterval), en een enkel ping-pakket laat apparaten flapperen | `_mark_absent()` na een scan, parallelle lookups, `ping -c 2`, en een harde tijdslimiet op de sweep |
+| 13 | Migratie op een bestaande database wist provider_secrets en provider_records | Bij `ALTER TABLE providers RENAME` herschrijft SQLite de foreign keys van vier verwijzende tabellen mee; `DROP TABLE` cascadeerde hun rijen daarna weg. De migratietest bevatte die vier tabellen niet, dus bewees niets | Herbouw via de gedocumenteerde route (nieuwe tabel, kopiëren, oude weg, hernoemen) met `foreign_keys=OFF` en een `foreign_key_check` achteraf |
+| 14 | CSV boven 1 MB werd stil afgekapt | `file.read(1_000_000)` sneed halverwege een regel af en liet duizenden apparaten vallen, met een melding die 'gelukt' zei | Weigeren met HTTP 413 in plaats van afkappen |
+| 15 | Escape sluit de lades niet | Een `<dialog>` sluit vanzelf met Escape, de lades zijn gewone divs met een blokkerende backdrop. Halve app reageerde op Escape, andere helft niet | Eén keydown-handler voor lades en zoekresultaten |
+| 16 | De 'draagbaar'-badge stond ineens in hoofdletters | Een tweede `.pill`-definitie voor het veranderingenoverzicht botste met de bestaande | Eigen naam `.change-pill` |
+| 17 | De wizard zette het pollinterval van de ARP-bron terug | `runScan()` gebruikte een hardgecodeerd provider-id en verving de hele config | Bron opzoeken op type, en de config bijwerken in plaats van vervangen |
+| 18 | `/api/changes` werd elke 30 seconden opgehaald | `renderChanges()` hing in `renderAll()`, die ook op de poll draait | Alleen ophalen als het Admin-tabblad open staat |
 
 ## Bijvangst bij deze punten
 

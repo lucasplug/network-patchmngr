@@ -111,9 +111,11 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .search-sub{grid-column:2;grid-row:2;color:var(--dim);font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Recente veranderingen. */
-.pill{padding:3px 8px;border-radius:20px;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
-.pill.new{background:rgba(var(--up-rgb),.14);color:var(--up)}
-.pill.gone{background:rgba(var(--down-rgb),.14);color:var(--down-ink)}
+/* Eigen naam: .pill bestond al voor de 'draagbaar'-badge bij back-ups, en die
+   werd door een tweede definitie stilletjes rond en in hoofdletters. */
+.change-pill{padding:3px 8px;border-radius:20px;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+.change-pill.new{background:rgba(var(--up-rgb),.14);color:var(--up)}
+.change-pill.gone{background:rgba(var(--down-rgb),.14);color:var(--down-ink)}
 #changes-days{padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--dim);font-size:10px}
 
 /* Een kaart oplichten na een zoektreffer. */

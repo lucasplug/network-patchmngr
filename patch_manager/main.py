@@ -751,6 +751,9 @@ def wizard_state(payload: WizardStateInput, auth: AuthContext = Depends(write_au
 
 
 CSV_COLUMNS = ("name", "type", "ip_address", "mac_address", "hostname", "notes")
+# Ruim boven wat ~40 apparaten nodig hebben; groter is vrijwel zeker een
+# vergissing en verdient een melding, geen halve import.
+CSV_MAX_BYTES = 1_000_000
 
 
 @app.post("/api/entities/import-csv")
@@ -763,7 +766,13 @@ async def import_entities_csv(
     mag je inventaris niet leegmaken. Rijen die niet kloppen worden benoemd in
     plaats van stil overgeslagen.
     """
-    raw = (await file.read(1_000_000)).decode("utf-8-sig", errors="replace")
+    # Eén byte meer lezen dan we accepteren: zo weten we of er méér was. Stil
+    # afkappen zou halverwege een regel gebeuren en duizenden apparaten laten
+    # verdwijnen terwijl de melding "gelukt" zegt.
+    payload = await file.read(CSV_MAX_BYTES + 1)
+    if len(payload) > CSV_MAX_BYTES:
+        raise HTTPException(413, f"Bestand is groter dan {CSV_MAX_BYTES // 1_000_000} MB; splits het op")
+    raw = payload.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(raw))
     if not reader.fieldnames or "name" not in [name.strip().lower() for name in reader.fieldnames]:
         raise HTTPException(422, f"Eerste regel moet kolomnamen bevatten, met minimaal 'name'. Toegestaan: {', '.join(CSV_COLUMNS)}")
