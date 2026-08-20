@@ -13,6 +13,12 @@ from patch_manager.speedtest import parse_result
 from tests.conftest import CREDENTIALS, TEST_ROOT, setup_admin
 
 
+def login_headers(client: TestClient) -> dict[str, str]:
+    response = client.post("/api/auth/login", json=CREDENTIALS)
+    assert response.status_code == 200, response.text
+    return {"X-CSRF-Token": response.json()["csrf_token"]}
+
+
 @pytest.mark.no_admin
 def test_initializes_expected_physical_inventory() -> None:
     with TestClient(app) as client:
@@ -530,3 +536,116 @@ def test_dns_record_rejects_unknown_entity_with_404_not_500() -> None:
                   "entity_id": "bestaat-niet"},
         )
         assert updated.status_code == 404, updated.text
+
+
+def test_manual_input_rejects_whitespace_and_duplicate_mac_addresses() -> None:
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        blank = client.post("/api/entities", headers=headers, json={"name": "   ", "type": "device"})
+        assert blank.status_code == 422
+        embedded = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "Ingebed", "type": "device", "mac_address": "mac=aa:bb:cc:dd:ee:ff;"},
+        )
+        assert embedded.status_code == 422
+        first = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "Eerste MAC", "type": "device", "mac_address": "AA-BB-CC-DD-EE-FF"},
+        )
+        assert first.status_code == 200, first.text
+        duplicate = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "Tweede MAC", "type": "device", "mac_address": "aa:bb:cc:dd:ee:ff"},
+        )
+        assert duplicate.status_code == 409
+
+
+@pytest.mark.no_admin
+def test_setup_rejects_a_whitespace_only_username() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/auth/setup",
+            json={"username": "   ", "password": "correct horse battery staple"},
+        )
+        assert response.status_code == 422
+    assert database.fetch_one("SELECT id FROM users") is None
+
+
+def test_merge_cannot_make_the_target_its_own_parent() -> None:
+    now = "2026-08-20T12:00:00+00:00"
+    source_id = "fat-source"
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        target_id = client.post(
+            "/api/entities", headers=headers, json={"name": "Doel", "type": "host"},
+        ).json()["id"]
+        with database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO entities(id,name,type,origin,status,created_at,updated_at)
+                   VALUES(?,?,'host','discovered','up',?,?)""",
+                (source_id, "Bron", now, now),
+            )
+            connection.execute("UPDATE entities SET parent_id=? WHERE id=?", (source_id, target_id))
+        response = client.post(
+            f"/api/entities/{source_id}/merge", headers=headers,
+            json={"target_entity_id": target_id},
+        )
+        assert response.status_code == 200, response.text
+    target = database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (target_id,))
+    assert target is not None and target["parent_id"] is None
+
+
+def test_config_import_defers_cross_table_monitor_relations() -> None:
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        monitor_id = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "Exportmonitor", "type": "monitor"},
+        ).json()["id"]
+        exported = client.get("/api/config/export").json()
+        monitor = next(row for row in exported["tables"]["entities"] if row["id"] == monitor_id)
+        monitor = {**monitor, "id": "cfg-monitor", "name": "Geïmporteerde monitor"}
+        device = {
+            **exported["tables"]["physical_devices"][0],
+            "id": "cfg-device",
+            "name": "Geïmporteerde switch",
+            "monitor_entity_id": "cfg-monitor",
+        }
+        payload = {
+            "format": "plugnet-config", "version": 1,
+            "tables": {"entities": [monitor], "physical_devices": [device]},
+        }
+        imported = client.post("/api/config/import", headers=headers, json=payload)
+        assert imported.status_code == 200, imported.text
+    row = database.fetch_one("SELECT monitor_entity_id FROM physical_devices WHERE id='cfg-device'")
+    assert row is not None and row["monitor_entity_id"] == "cfg-monitor"
+
+
+def test_portable_restore_rolls_back_database_when_key_replace_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAT-BCK-005: database en sleutel blijven altijd een geldig paar."""
+    import patch_manager.db as db_module
+    from patch_manager.main import SECRET_KEY_PATH
+
+    with database.transaction() as connection:
+        connection.execute("UPDATE app_meta SET value='In back-up' WHERE key='app_title'")
+    bundle = database.create_backup_bundle(TEST_ROOT / "backups", SECRET_KEY_PATH)
+    with database.transaction() as connection:
+        connection.execute("UPDATE app_meta SET value='Actieve toestand' WHERE key='app_title'")
+
+    real_replace = db_module.os.replace
+    failed = False
+
+    def fail_key_replace(source, destination):
+        nonlocal failed
+        if not failed and destination == SECRET_KEY_PATH and str(source).endswith(".restore"):
+            failed = True
+            raise OSError("geïnjecteerde sleutelfout")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(db_module.os, "replace", fail_key_replace)
+    with pytest.raises(OSError, match="sleutelfout"):
+        database.restore_backup(bundle, SECRET_KEY_PATH)
+
+    assert database.fetch_one("SELECT value FROM app_meta WHERE key='app_title'")["value"] == "Actieve toestand"

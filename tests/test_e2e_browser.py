@@ -148,6 +148,12 @@ def hidden(page: Page, selector: str) -> bool:
     return bool(page.locator(selector).evaluate("element => element.classList.contains('hidden')"))
 
 
+def accept_confirmation(page: Page) -> None:
+    """Bevestig via dezelfde toegankelijke dialoog die een gebruiker ziet."""
+    expect(page.locator("#confirmation-dialog")).to_be_visible()
+    page.click("#confirmation-accept")
+
+
 # --- scenario's -------------------------------------------------------------
 
 def test_linking_a_discovery_and_unlinking_it_puts_it_back(with_discovery, page: Page) -> None:
@@ -177,7 +183,6 @@ def test_linking_a_discovery_and_unlinking_it_puts_it_back(with_discovery, page:
     page.locator("[data-device-card] .port-face").first.click()
     settle(page)
     assert not hidden(page, "#disconnect-port"), "Een bezette poort hoort een ontkoppelknop te tonen"
-    page.once("dialog", lambda box: box.accept())
     page.click("#disconnect-port")
     settle(page)
 
@@ -319,8 +324,8 @@ def test_creating_and_deleting_a_device_leaves_no_trace(page: Page) -> None:
     assert page.locator("#manual-entities-list [data-entity-delete]").count() == rows_before + 1
 
     row = page.locator("#manual-entities-list .entity-row", has_text="Wegwerpapparaat").first
-    page.once("dialog", lambda box: box.accept())
     row.locator("[data-entity-delete]").click()
+    accept_confirmation(page)
     settle(page)
     assert page.locator("#unpatched-list .chip-device").count() == before
     assert page.locator("#manual-entities-list [data-entity-delete]").count() == rows_before
@@ -353,3 +358,83 @@ def test_every_tab_renders_without_errors(page: Page) -> None:
     for name in ("patch", "topology", "apps", "admin", "patch"):
         tab(page, name)
         assert page.locator(f"#{name}-view.active").count() == 1
+
+
+def test_editing_a_patch_panel_keeps_its_port_count(page: Page) -> None:
+    """Voor- en achterzijde zijn twee rijen van dezelfde genummerde poorten.
+
+    Het bewerkformulier telde vroeger beide rijen op en verdubbelde zo bij elke
+    opslag een patchpanel van 2 naar 4, daarna 8, enzovoort.
+    """
+    tab(page, "patch")
+    page.click("#new-physical-button")
+    page.fill("#physical-form input[name=name]", "Testpanel")
+    page.select_option("#physical-form select[name=type]", "patch_panel")
+    page.fill("#physical-form input[name=ports]", "2")
+    page.click("#physical-submit")
+    settle(page)
+
+    card = page.locator("[data-device-card]", has_text="Testpanel")
+    expect(card).to_be_visible()
+    card.locator("[data-physical-edit]").click()
+    expect(page.locator("#physical-dialog")).to_be_visible()
+    assert page.input_value("#physical-form input[name=ports]") == "2"
+    assert page.inner_text("#physical-submit") == "Wijzigingen opslaan"
+    page.click("#physical-submit")
+    settle(page)
+
+    card = page.locator("[data-device-card]", has_text="Testpanel")
+    card.locator("[data-physical-edit]").click()
+    assert page.input_value("#physical-form input[name=ports]") == "2", \
+        "Een tweede bewerking mag het poortaantal niet verdubbelen"
+
+
+def test_manual_topology_relation_is_keyboard_accessible_and_deletable(page: Page) -> None:
+    """Een dunne SVG-lijn moet ook zonder pixeljacht te beheren zijn."""
+    tab(page, "topology")
+    page.click("#topology-edit")
+    settle(page)
+    relations = page.locator("#topology-canvas .relation-hit.manual")
+    before = relations.count()
+    assert before >= 1, "De standaardtopologie hoort een handmatige relatie te bevatten"
+
+    relation = relations.first
+    assert relation.get_attribute("role") == "button"
+    assert relation.get_attribute("tabindex") == "0"
+    relation.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("#topology-relation-dialog")).to_be_visible()
+    assert page.input_value("#topology-relation-form input[name=relation_id]")
+    expect(page.locator("#delete-topology-relation")).to_be_visible()
+
+    page.click("#delete-topology-relation")
+    accept_confirmation(page)
+    settle(page)
+    assert page.locator("#topology-relation-dialog[open]").count() == 0
+    assert page.locator("#topology-canvas .relation-hit.manual").count() == before - 1
+
+
+def test_all_main_views_fit_a_phone_viewport(page: Page) -> None:
+    """Elke hoofdfunctie blijft op 390px binnen de pagina zelf.
+
+    De topologiekaart mag in zijn eigen vlak scrollen; de hele pagina niet.
+    """
+    page.set_viewport_size({"width": 390, "height": 844})
+    for name in ("patch", "apps", "topology", "admin"):
+        tab(page, name)
+        dimensions = page.evaluate("""() => ({
+          viewport: window.innerWidth,
+          document: document.documentElement.scrollWidth,
+          body: document.body.scrollWidth
+        })""")
+        assert dimensions["document"] <= dimensions["viewport"], f"{name} maakt de pagina te breed: {dimensions}"
+        assert dimensions["body"] <= dimensions["viewport"], f"{name} maakt de body te breed: {dimensions}"
+
+
+def test_speedtest_dialog_offers_the_full_supported_interval_range(page: Page) -> None:
+    tab(page, "admin")
+    page.click("#speed-settings-button")
+    options = page.locator("#speed-form select[name=interval_seconds] option").evaluate_all(
+        "items => items.map(item => item.value)"
+    )
+    assert options == ["900", "1800", "3600", "7200", "10800", "21600", "43200", "86400", "604800"]

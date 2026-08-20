@@ -20,7 +20,7 @@ from .secret_store import SecretStore
 
 logger = logging.getLogger(__name__)
 
-MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
+MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\Z")
 
 # Vlag ATF_COM in /proc/net/arp: het adres is echt opgelost. Staat hij niet aan,
 # dan is het een lege buur met MAC 00:00:00:00:00:00.
@@ -41,7 +41,7 @@ def normalize_mac(value: str | None) -> str | None:
     """
     if not value:
         return None
-    match = MAC_RE.search(value.replace("-", ":"))
+    match = MAC_RE.fullmatch(value.strip().replace("-", ":"))
     if not match:
         return None
     mac = match.group(0).lower()

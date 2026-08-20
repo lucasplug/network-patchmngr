@@ -864,22 +864,60 @@ class Database:
             return False
         if secret_key_path is None:
             raise RuntimeError("Voor dit back-uppakket is een sleutelpad vereist")
-        with zipfile.ZipFile(source_path) as archive, tempfile.TemporaryDirectory(
-            prefix="patch-manager-restore-", dir=source_path.parent
-        ) as temporary:
-            database_copy = Path(temporary) / "database.db"
-            with archive.open("database.db") as source, database_copy.open("wb") as destination:
-                shutil.copyfileobj(source, destination, length=1024 * 1024)
-            secret_key_path.parent.mkdir(parents=True, exist_ok=True)
-            key_copy = secret_key_path.with_name(f".{secret_key_path.name}.{uuid.uuid4().hex}.tmp")
-            try:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        secret_key_path.parent.mkdir(parents=True, exist_ok=True)
+        suffix = uuid.uuid4().hex
+        database_copy = self.path.with_name(f".{self.path.name}.{suffix}.restore")
+        database_rollback = self.path.with_name(f".{self.path.name}.{suffix}.rollback")
+        key_copy = secret_key_path.with_name(f".{secret_key_path.name}.{suffix}.restore")
+        key_rollback = secret_key_path.with_name(f".{secret_key_path.name}.{suffix}.rollback")
+        had_database = self.path.is_file()
+        had_key = secret_key_path.is_file()
+        database_replaced = key_replaced = False
+        try:
+            with zipfile.ZipFile(source_path) as archive:
+                with archive.open("database.db") as source, database_copy.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
                 key_copy.write_bytes(archive.read("provider-secrets.key").strip() + b"\n")
-                os.chmod(key_copy, 0o600)
-                self._restore_sqlite(database_copy)
+            os.chmod(key_copy, 0o600)
+
+            # Migreer en initialiseer eerst de kopie. De actieve database en
+            # sleutel blijven tot hier byte-voor-byte ongemoeid.
+            Database(database_copy).initialize()
+            self._validate_sqlite(database_copy)
+            if had_database:
+                shutil.copy2(self.path, database_rollback)
+            if had_key:
+                shutil.copy2(secret_key_path, key_rollback)
+
+            try:
+                os.replace(database_copy, self.path)
+                database_replaced = True
                 os.replace(key_copy, secret_key_path)
+                key_replaced = True
                 os.chmod(secret_key_path, 0o600)
-            finally:
-                key_copy.unlink(missing_ok=True)
+                self.initialize()
+            except Exception:
+                # Twee bestanden kunnen niet met één POSIX-rename worden
+                # gewisseld. Daarom houden we van beide een rollbackkopie en
+                # herstellen we de oorspronkelijke combinatie voordat de fout
+                # de API verlaat.
+                if database_replaced:
+                    if had_database:
+                        os.replace(database_rollback, self.path)
+                    else:
+                        self.path.unlink(missing_ok=True)
+                if key_replaced:
+                    if had_key:
+                        os.replace(key_rollback, secret_key_path)
+                    else:
+                        secret_key_path.unlink(missing_ok=True)
+                if had_database:
+                    self.initialize()
+                raise
+        finally:
+            for temporary_path in (database_copy, database_rollback, key_copy, key_rollback):
+                temporary_path.unlink(missing_ok=True)
         return True
 
     @staticmethod

@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__, categories
 from .db import PROVIDER_TEMPLATES, Database, expires_in, utcnow
@@ -75,14 +75,29 @@ class Credentials(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=12, max_length=256)
 
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_username(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
-class UplinkInput(BaseModel):
+
+class TrimmedInput(BaseModel):
+    """Trim zichtbare tekst vóór lengtevalidatie en opslag.
+
+    Zonder deze configuratie voldoet een reeks spaties aan ``min_length`` en
+    wordt hij pas later als lege string opgeslagen.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class UplinkInput(TrimmedInput):
     """Aan welk netwerkapparaat iets hangt zonder dat er een poort bij hoort."""
 
     physical_device_id: str | None = Field(default=None, max_length=64)
 
 
-class EntityInput(BaseModel):
+class EntityInput(TrimmedInput):
     name: str = Field(min_length=1, max_length=100)
     type: str = Field(default="device", max_length=40)
     ip_address: str | None = Field(default=None, max_length=64)
@@ -90,8 +105,18 @@ class EntityInput(BaseModel):
     hostname: str | None = Field(default=None, max_length=255)
     notes: str = Field(default="", max_length=2000)
 
+    @field_validator("mac_address", mode="before")
+    @classmethod
+    def validate_mac_address(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        normalized = normalize_mac(str(value))
+        if normalized is None:
+            raise ValueError("MAC-adres moet exact het formaat aa:bb:cc:dd:ee:ff hebben")
+        return normalized
 
-class PhysicalDeviceInput(BaseModel):
+
+class PhysicalDeviceInput(TrimmedInput):
     name: str = Field(min_length=1, max_length=100)
     type: str = Field(default="switch", max_length=40)
     model: str = Field(default="", max_length=100)
@@ -103,7 +128,7 @@ class PhysicalDeviceInput(BaseModel):
     monitor_entity_id: str | None = Field(default=None, max_length=64)
 
 
-class CableInput(BaseModel):
+class CableInput(TrimmedInput):
     a_port_id: str
     b_port_id: str | None = None
     b_entity_id: str | None = None
@@ -112,22 +137,23 @@ class CableInput(BaseModel):
     notes: str = Field(default="", max_length=2000)
 
 
-class PortCableInput(BaseModel):
+class PortCableInput(TrimmedInput):
     """Zelfde als CableInput, maar de a-poort komt uit het pad."""
     b_port_id: str | None = None
     b_entity_id: str | None = None
+    move_cable_id: str | None = Field(default=None, max_length=64)
     label: str = Field(default="", max_length=100)
     color: str = Field(default="", max_length=40)
     notes: str = Field(default="", max_length=2000)
 
 
-class PortInput(BaseModel):
+class PortInput(TrimmedInput):
     label: str = Field(default="", max_length=100)
     speed_mbps: int | None = Field(default=None, ge=10, le=100000)
     notes: str = Field(default="", max_length=2000)
 
 
-class ProviderInput(BaseModel):
+class ProviderInput(TrimmedInput):
     # Met twee Portainers moet je ze uit elkaar kunnen houden.
     name: str | None = Field(default=None, max_length=100)
     enabled: bool
@@ -137,7 +163,7 @@ class ProviderInput(BaseModel):
     clear_credentials: list[str] = Field(default_factory=list)
 
 
-class AppLinkInput(BaseModel):
+class AppLinkInput(TrimmedInput):
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=1, max_length=500)
     description: str = Field(default="", max_length=200)
@@ -147,22 +173,22 @@ class AppLinkInput(BaseModel):
     position: int = Field(default=0, ge=0, le=999)
 
 
-class ProviderCreateInput(BaseModel):
+class ProviderCreateInput(TrimmedInput):
     """Een tweede omgeving van een soort die je al hebt."""
 
     type: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=100)
 
 
-class AppSettingsInput(BaseModel):
+class AppSettingsInput(TrimmedInput):
     title: str = Field(min_length=2, max_length=80)
 
 
-class ConflictInput(BaseModel):
+class ConflictInput(TrimmedInput):
     resolution: str = Field(min_length=2, max_length=100)
 
 
-class TopologyNodeInput(BaseModel):
+class TopologyNodeInput(TrimmedInput):
     label: str = Field(min_length=1, max_length=100)
     subtitle: str = Field(default="", max_length=150)
     parent_node_id: str | None = None
@@ -173,34 +199,34 @@ class TopologyNodeInput(BaseModel):
     hidden: bool = False
 
 
-class TopologyPositionInput(BaseModel):
+class TopologyPositionInput(TrimmedInput):
     x: float
     y: float
 
 
-class TopologyPositionsInput(BaseModel):
+class TopologyPositionsInput(TrimmedInput):
     positions: list[dict[str, Any]] = Field(min_length=1, max_length=200)
 
 
-class TopologyGroupSelectionInput(BaseModel):
+class TopologyGroupSelectionInput(TrimmedInput):
     node_ids: list[str] = Field(min_length=1, max_length=200)
     parent_node_id: str
 
 
-class TopologyGroupInput(BaseModel):
+class TopologyGroupInput(TrimmedInput):
     label: str = Field(min_length=1, max_length=100)
     subtitle: str = Field(default="", max_length=150)
     node_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
-class TopologyRelationInput(BaseModel):
+class TopologyRelationInput(TrimmedInput):
     from_node_id: str
     to_node_id: str
     relation_type: str = Field(default="dependency", pattern="^(dependency|network|service|uplink)$")
     label: str = Field(default="", max_length=100)
 
 
-class SpeedtestSettingsInput(BaseModel):
+class SpeedtestSettingsInput(TrimmedInput):
     enabled: bool
     interval_seconds: int = Field(ge=900, le=86400 * 7)
     server_id: str | None = Field(default=None, max_length=80)
@@ -208,7 +234,7 @@ class SpeedtestSettingsInput(BaseModel):
     duration_seconds: int = Field(default=10, ge=5, le=30)
 
 
-class DnsRecordInput(BaseModel):
+class DnsRecordInput(TrimmedInput):
     name: str = Field(min_length=1, max_length=253)
     record_type: str = Field(default="A", pattern="^(A|AAAA|CNAME)$")
     value: str = Field(min_length=1, max_length=253)
@@ -217,30 +243,30 @@ class DnsRecordInput(BaseModel):
     entity_id: str | None = None
 
 
-class DiscoveryStateInput(BaseModel):
+class DiscoveryStateInput(TrimmedInput):
     ignored: bool = False
     archived: bool = False
 
 
-class EntityMergeInput(BaseModel):
+class EntityMergeInput(TrimmedInput):
     target_entity_id: str
 
 
-class ProviderMappingInput(BaseModel):
+class ProviderMappingInput(TrimmedInput):
     entity_id: str | None = None
 
 
-class ProviderTestInput(BaseModel):
+class ProviderTestInput(TrimmedInput):
     config: dict[str, Any]
     credentials: dict[str, str | None] = Field(default_factory=dict)
 
 
-class PromoteInput(BaseModel):
+class PromoteInput(TrimmedInput):
     name: str | None = Field(default=None, max_length=100)
     type: str | None = Field(default=None, max_length=40)
 
 
-class WizardStateInput(BaseModel):
+class WizardStateInput(TrimmedInput):
     dismissed: bool
 
 
@@ -948,16 +974,23 @@ def promote_entity(entity_id: str, payload: PromoteInput, auth: AuthContext = De
 
 @app.post("/api/entities")
 def create_entity(payload: EntityInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    if payload.mac_address and database.fetch_one(
+        "SELECT id FROM entities WHERE lower(mac_address)=?", (payload.mac_address,)
+    ):
+        raise HTTPException(409, "Dit MAC-adres hoort al bij een ander device")
     entity_id = str(uuid.uuid4())
     now = utcnow()
-    with database.transaction() as connection:
-        connection.execute(
-            """INSERT INTO entities
-               (id,name,type,origin,status,ip_address,mac_address,hostname,notes,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (entity_id, payload.name.strip(), payload.type, "manual", "unknown", payload.ip_address,
-             payload.mac_address.lower() if payload.mac_address else None, payload.hostname, payload.notes, now, now),
-        )
+    try:
+        with database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO entities
+                   (id,name,type,origin,status,ip_address,mac_address,hostname,notes,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (entity_id, payload.name, payload.type, "manual", "unknown", payload.ip_address,
+                 payload.mac_address, payload.hostname, payload.notes, now, now),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Dit MAC-adres hoort al bij een ander device") from exc
     database.audit(auth.user_id, "entity.create", "entity", entity_id, payload.model_dump())
     return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
 
@@ -969,13 +1002,20 @@ def update_entity(entity_id: str, payload: EntityInput, auth: AuthContext = Depe
         raise HTTPException(404, "Device niet gevonden")
     if entity["origin"] != "manual":
         raise HTTPException(409, "Een geïmporteerd device bewerk je in de databron of via samenvoegen")
-    with database.transaction() as connection:
-        connection.execute(
-            """UPDATE entities SET name=?,type=?,ip_address=?,mac_address=?,hostname=?,notes=?,updated_at=?
-               WHERE id=?""",
-            (payload.name.strip(), payload.type, payload.ip_address,
-             payload.mac_address.lower() if payload.mac_address else None, payload.hostname, payload.notes, utcnow(), entity_id),
-        )
+    if payload.mac_address and database.fetch_one(
+        "SELECT id FROM entities WHERE lower(mac_address)=? AND id<>?", (payload.mac_address, entity_id)
+    ):
+        raise HTTPException(409, "Dit MAC-adres hoort al bij een ander device")
+    try:
+        with database.transaction() as connection:
+            connection.execute(
+                """UPDATE entities SET name=?,type=?,ip_address=?,mac_address=?,hostname=?,notes=?,updated_at=?
+                   WHERE id=?""",
+                (payload.name, payload.type, payload.ip_address,
+                 payload.mac_address, payload.hostname, payload.notes, utcnow(), entity_id),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Dit MAC-adres hoort al bij een ander device") from exc
     database.audit(auth.user_id, "entity.update", "entity", entity_id, payload.model_dump())
     return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
 
@@ -1051,12 +1091,34 @@ def merge_entity(entity_id: str, payload: EntityMergeInput, auth: AuthContext = 
         "SELECT * FROM topology_relations WHERE source='manual' AND (from_node_id=? OR to_node_id=?)",
         (source_node, source_node),
     )
+    # Een provider kan een target onder de discovery hebben gehangen. Bij de
+    # eenvoudige "alle kinderen naar target"-update werd target dan zijn eigen
+    # parent (of ontstond via een tussenlaag een cyclus). Haal het doel eerst
+    # uit de subtree en zet het op de plaats van de bron.
+    target_is_descendant = False
+    ancestor_id = target["parent_id"]
+    visited: set[str] = set()
+    while ancestor_id and ancestor_id not in visited:
+        if ancestor_id == source["id"]:
+            target_is_descendant = True
+            break
+        visited.add(ancestor_id)
+        ancestor = database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (ancestor_id,))
+        ancestor_id = ancestor["parent_id"] if ancestor else None
     with database.transaction() as connection:
         if source_cable:
             connection.execute("UPDATE cables SET b_entity_id=? WHERE b_entity_id=?", (target["id"], entity_id))
         for table in ("provider_records", "observations", "conflicts"):
             connection.execute(f"UPDATE {table} SET entity_id=? WHERE entity_id=?", (target["id"], entity_id))
-        connection.execute("UPDATE entities SET parent_id=? WHERE parent_id=?", (target["id"], entity_id))
+        if target_is_descendant:
+            replacement_parent = source["parent_id"] if source["parent_id"] != target["id"] else None
+            connection.execute(
+                "UPDATE entities SET parent_id=? WHERE id=?", (replacement_parent, target["id"])
+            )
+        connection.execute(
+            "UPDATE entities SET parent_id=? WHERE parent_id=? AND id<>?",
+            (target["id"], entity_id, target["id"]),
+        )
         connection.execute("UPDATE dns_records SET entity_id=? WHERE entity_id=?", (target["id"], entity_id))
         connection.execute("UPDATE proxy_hosts SET entity_id=? WHERE entity_id=?", (target["id"], entity_id))
         connection.execute("UPDATE proxy_hosts SET service_entity_id=? WHERE service_entity_id=?", (target["id"], entity_id))
@@ -1243,7 +1305,11 @@ def update_port(port_id: str, payload: PortInput, auth: AuthContext = Depends(wr
     return {"ok": True}
 
 
-def validate_cable(payload: CableInput, replace_port_id: str | None = None) -> None:
+def validate_cable(
+    payload: CableInput,
+    replace_port_id: str | None = None,
+    replace_cable_id: str | None = None,
+) -> None:
     """Controleer uiteinden en bezetting; replace_port_id mag zijn eigen kabel vervangen."""
     if (payload.b_port_id is None) == (payload.b_entity_id is None):
         raise HTTPException(422, "Kies precies één ander uiteinde: een poort of een device")
@@ -1260,32 +1326,51 @@ def validate_cable(payload: CableInput, replace_port_id: str | None = None) -> N
         occupied = database.fetch_one(
             "SELECT id FROM cables WHERE (a_port_id=? OR b_port_id=?)", (port_id, port_id)
         )
-        if occupied and not (replace_port_id and port_id == replace_port_id):
+        if occupied and not (
+            (replace_port_id and port_id == replace_port_id)
+            or (replace_cable_id and occupied["id"] == replace_cable_id)
+        ):
             raise HTTPException(409, f"Poort {port_id} is al bezet; koppel die eerst los")
     if payload.b_entity_id:
         linked = database.fetch_one(
-            "SELECT a_port_id FROM cables WHERE b_entity_id=?", (payload.b_entity_id,)
+            "SELECT id,a_port_id FROM cables WHERE b_entity_id=?", (payload.b_entity_id,)
         )
-        if linked and not (replace_port_id and linked["a_port_id"] == replace_port_id):
+        if linked and not (
+            (replace_port_id and linked["a_port_id"] == replace_port_id)
+            or (replace_cable_id and linked["id"] == replace_cable_id)
+        ):
             raise HTTPException(409, "Dit device is al aan een andere poort gekoppeld")
 
 
-def insert_cable(payload: CableInput, user_id: str) -> dict[str, Any]:
+def _insert_cable(
+    connection: sqlite3.Connection, payload: CableInput, user_id: str
+) -> dict[str, Any]:
     cable_id = str(uuid.uuid4())
-    with database.transaction() as connection:
+    connection.execute(
+        """INSERT INTO cables(id,a_port_id,b_port_id,b_entity_id,label,color,notes,updated_at,updated_by)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (cable_id, payload.a_port_id, payload.b_port_id, payload.b_entity_id,
+         payload.label, payload.color, payload.notes, utcnow(), user_id),
+    )
+    # Een kabel is preciezer dan "hangt ergens aan": de losse uplink zou
+    # er alleen naast blijven staan en tegenspreken waar het ding zit.
+    if payload.b_entity_id:
         connection.execute(
-            """INSERT INTO cables(id,a_port_id,b_port_id,b_entity_id,label,color,notes,updated_at,updated_by)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (cable_id, payload.a_port_id, payload.b_port_id, payload.b_entity_id,
-             payload.label, payload.color, payload.notes, utcnow(), user_id),
+            "UPDATE entities SET uplink_device_id=NULL WHERE id=?", (payload.b_entity_id,)
         )
-        # Een kabel is preciezer dan "hangt ergens aan": de losse uplink zou
-        # er alleen naast blijven staan en tegenspreken waar het ding zit.
-        if payload.b_entity_id:
-            connection.execute(
-                "UPDATE entities SET uplink_device_id=NULL WHERE id=?", (payload.b_entity_id,)
-            )
-    return database.fetch_one("SELECT * FROM cables WHERE id=?", (cable_id,))
+    row = connection.execute("SELECT * FROM cables WHERE id=?", (cable_id,)).fetchone()
+    return dict(row)
+
+
+def insert_cable(
+    payload: CableInput,
+    user_id: str,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    if connection is not None:
+        return _insert_cable(connection, payload, user_id)
+    with database.transaction() as active_connection:
+        return _insert_cable(active_connection, payload, user_id)
 
 
 @app.get("/api/ports/{port_id}/trace")
@@ -1330,11 +1415,21 @@ def cable_delete(cable_id: str, auth: AuthContext = Depends(write_auth)) -> dict
 @app.put("/api/ports/{port_id}/cable")
 def port_cable_set(port_id: str, payload: PortCableInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     """Gemaksvorm voor de poortdrawer: vervang de kabel op deze poort in één stap."""
-    cable_input = CableInput(a_port_id=port_id, **payload.model_dump())
-    validate_cable(cable_input, replace_port_id=port_id)
+    cable_input = CableInput(
+        a_port_id=port_id, **payload.model_dump(exclude={"move_cable_id"})
+    )
+    validate_cable(
+        cable_input,
+        replace_port_id=port_id,
+        replace_cable_id=payload.move_cable_id,
+    )
     with database.transaction() as connection:
+        if payload.move_cable_id:
+            cursor = connection.execute("DELETE FROM cables WHERE id=?", (payload.move_cable_id,))
+            if cursor.rowcount == 0:
+                raise HTTPException(404, "Te verplaatsen kabel niet gevonden")
         connection.execute("DELETE FROM cables WHERE a_port_id=? OR b_port_id=?", (port_id, port_id))
-    cable = insert_cable(cable_input, auth.user_id)
+        cable = insert_cable(cable_input, auth.user_id, connection=connection)
     database.audit(auth.user_id, "port.cable.set", "port", port_id, payload.model_dump())
     return cable
 
@@ -1621,7 +1716,7 @@ def backup_restore(name: str, confirm: str, auth: AuthContext = Depends(write_au
 
 
 CONFIG_TABLES = (
-    "providers", "physical_devices", "entities", "ports", "cables",
+    "providers", "entities", "physical_devices", "ports", "cables",
     "topology_nodes", "topology_relations", "dns_records", "speedtest_settings",
 )
 
@@ -1649,6 +1744,8 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
     database.prune_backups(settings.backup_dir, settings.backup_retention_daily)
     imported = 0
     entity_parents: list[tuple[str, str]] = []
+    entity_uplinks: list[tuple[str, str]] = []
+    physical_monitors: list[tuple[str, str]] = []
     try:
         with database.transaction() as connection:
             imported_settings = payload.get("settings") or {}
@@ -1675,6 +1772,12 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     if table == "entities" and row.get("parent_id"):
                         entity_parents.append((str(row["parent_id"]), str(row[primary])))
                         row["parent_id"] = None
+                    if table == "entities" and row.get("uplink_device_id"):
+                        entity_uplinks.append((str(row["uplink_device_id"]), str(row[primary])))
+                        row["uplink_device_id"] = None
+                    if table == "physical_devices" and row.get("monitor_entity_id"):
+                        physical_monitors.append((str(row["monitor_entity_id"]), str(row[primary])))
+                        row["monitor_entity_id"] = None
                     if table == "cables":
                         row["updated_by"] = None
                     if table == "ports":
@@ -1692,6 +1795,14 @@ def config_import(payload: dict[str, Any], auth: AuthContext = Depends(write_aut
                     imported += 1
             for parent_id, entity_id in entity_parents:
                 connection.execute("UPDATE entities SET parent_id=? WHERE id=?", (parent_id, entity_id))
+            for device_id, entity_id in entity_uplinks:
+                connection.execute(
+                    "UPDATE entities SET uplink_device_id=? WHERE id=?", (device_id, entity_id)
+                )
+            for entity_id, device_id in physical_monitors:
+                connection.execute(
+                    "UPDATE physical_devices SET monitor_entity_id=? WHERE id=?", (entity_id, device_id)
+                )
             for raw in payload["tables"].get("ports", []):
                 if isinstance(raw, dict) and raw.get("peer_port_id"):
                     connection.execute(
