@@ -185,7 +185,9 @@ aanmaken én weggooien. Losse endpointtests zagen dat soort halve wegen niet.
 .venv/bin/pytest tests/test_e2e_browser.py -q
 ```
 
-Zonder Playwright slaat pytest dat bestand over.
+Zonder Playwright of axe-core slaat pytest dat bestand over. Beide worden via
+`requirements-dev.txt` geïnstalleerd; de browsertests controleren ook WCAG-
+regressies in licht/donker, dialogen, 320px-reflow en tekstafstand.
 
 ## Datamodel
 

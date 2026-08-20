@@ -26,9 +26,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("playwright.sync_api", reason="Playwright is niet geïnstalleerd")
+pytest.importorskip("axe_playwright_python.sync_playwright", reason="axe-core is niet geïnstalleerd")
 
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
+from axe_playwright_python.sync_playwright import Axe  # noqa: E402
 from playwright.sync_api import Page, expect, sync_playwright  # noqa: E402
 
 from patch_manager.main import app, database, providers  # noqa: E402
@@ -332,11 +334,7 @@ def test_creating_and_deleting_a_device_leaves_no_trace(page: Page) -> None:
 
 
 def test_escape_closes_every_overlay(page: Page) -> None:
-    """Half de app reageert op Escape en de andere helft niet is geen UI.
-
-    De lades zijn gewone divs met een blokkerende achtergrond; een `<dialog>`
-    sluit vanzelf. Beide horen zich hetzelfde te gedragen.
-    """
+    """Elke overlay sluit voorspelbaar met Escape."""
     tab(page, "patch")
     page.locator("[data-device-card] .port-face").first.click()
     settle(page)
@@ -344,7 +342,7 @@ def test_escape_closes_every_overlay(page: Page) -> None:
     page.keyboard.press("Escape")
     settle(page)
     assert not page.locator("#port-drawer").evaluate("element => element.classList.contains('open')")
-    assert hidden(page, "#drawer-backdrop"), "De achtergrond hoort mee te verdwijnen"
+    assert not page.locator("#port-drawer").evaluate("element => element.open")
 
     page.click("#new-entity-button")
     page.wait_for_selector("#entity-dialog[open]")
@@ -353,26 +351,29 @@ def test_escape_closes_every_overlay(page: Page) -> None:
     assert page.locator("#entity-dialog[open]").count() == 0
 
 
-def test_closed_drawers_are_inert_and_restore_keyboard_focus(page: Page) -> None:
-    """Een lade buiten beeld mag niet stiekem in de tabvolgorde blijven staan."""
+def test_drawers_are_modal_trap_focus_and_restore_keyboard_focus(page: Page) -> None:
+    """Een lade is een benoemde modal en houdt de focus vast tot sluiten."""
     tab(page, "patch")
     drawer = page.locator("#port-drawer")
     port = page.locator("[data-device-card] .port-face").first
-    assert drawer.get_attribute("inert") == ""
-    assert drawer.get_attribute("aria-hidden") == "true"
+    assert not drawer.evaluate("element => element.open")
+    assert drawer.get_attribute("aria-labelledby") == "drawer-title"
 
     port.focus()
     port.click()
     settle(page)
-    assert drawer.get_attribute("inert") is None
-    assert drawer.get_attribute("aria-hidden") == "false"
+    assert drawer.evaluate("element => element.open")
     assert page.locator("#port-drawer .drawer-close").evaluate(
         "element => element === document.activeElement"
     ), "De geopende lade hoort zelf de toetsenbordfocus te krijgen"
+    page.keyboard.press("Shift+Tab")
+    assert page.locator("#port-drawer").evaluate(
+        "element => element.contains(document.activeElement)"
+    ), "De modale lade hoort de toetsenbordfocus binnen de lade te houden"
 
     page.keyboard.press("Escape")
     settle(page)
-    assert drawer.get_attribute("inert") == ""
+    assert not drawer.evaluate("element => element.open")
     assert port.evaluate("element => element === document.activeElement"), \
         "Na sluiten hoort de focus terug te keren naar de gekozen poort"
 
@@ -524,3 +525,182 @@ def test_speedtest_dialog_offers_the_full_supported_interval_range(page: Page) -
         "items => items.map(item => item.value)"
     )
     assert options == ["900", "1800", "3600", "7200", "10800", "21600", "43200", "86400", "604800"]
+
+
+def assert_axe_clean(page: Page, state_name: str) -> None:
+    results = Axe().run(page)
+    assert results.violations_count == 0, f"{state_name}:\n{results.generate_report()}"
+
+
+def test_dialogs_have_names_buttons_have_types_and_interactives_are_not_nested(page: Page) -> None:
+    """Semantische regressies mogen niet via nieuwe markup terugkomen."""
+    for index in range(page.locator("dialog").count()):
+        dialog = page.locator("dialog").nth(index)
+        labelled_by = dialog.get_attribute("aria-labelledby")
+        assert labelled_by, f"Dialoog zonder aria-labelledby: {dialog.get_attribute('id')}"
+        assert page.locator(f"#{labelled_by}").inner_text().strip()
+
+    for name in ("patch", "apps", "topology", "admin"):
+        tab(page, name)
+    assert page.locator("button:not([type])").count() == 0
+    assert page.locator("a button, button a").count() == 0
+
+
+def test_app_tile_keeps_opening_and_editing_as_separate_actions(page: Page) -> None:
+    tab(page, "apps")
+    page.click("#new-app-button")
+    page.fill("#app-form input[name=name]", "Toegankelijke app")
+    page.fill("#app-form input[name=url]", "https://example.test")
+    page.click('#app-form button[type="submit"]')
+    settle(page)
+
+    card = page.locator(".app-card", has_text="Toegankelijke app")
+    assert card.locator("a.app-card-link").count() == 1
+    assert card.locator("button.app-edit").count() == 1
+    assert card.locator("a button").count() == 0
+    card.locator("button.app-edit").click()
+    expect(page.locator("#app-dialog")).to_be_visible()
+    assert page.input_value("#app-form input[name=name]") == "Toegankelijke app"
+
+
+def test_topology_has_text_status_and_non_drag_controls(page: Page) -> None:
+    tab(page, "topology")
+    expect(page.locator("#topology-text-summary table").first).to_be_attached()
+    assert page.locator("#topology-text-summary tbody tr").count() >= 2
+    statuses = page.locator("#topology-text-summary table").first.locator("tbody td:nth-child(2)").all_text_contents()
+    assert statuses and set(statuses) <= {"up", "down", "verminderd", "onbekend"}
+    assert page.locator("#topology-canvas .topo-status").count() >= 2
+
+    before_view = page.locator("#topology-canvas").get_attribute("viewBox")
+    page.click('[data-pan-x="1"]')
+    assert page.locator("#topology-canvas").get_attribute("viewBox") != before_view
+
+    page.click("#topology-edit")
+    settle(page)
+    node = page.locator("#topology-canvas [data-node-id]").first
+    node_id = node.get_attribute("data-node-id")
+    before_position = node.get_attribute("transform")
+    node.click()
+    expect(page.locator("#topology-node-dialog")).to_be_visible()
+    page.click('[data-nudge-x="1"]')
+    settle(page)
+    page.keyboard.press("Escape")
+    settle(page)
+    after_position = page.locator(f'[data-node-id="{node_id}"]').get_attribute("transform")
+    assert after_position != before_position
+
+
+def test_light_theme_contrast_and_key_target_sizes(page: Page) -> None:
+    if page.locator("html").get_attribute("data-theme") != "light":
+        page.click("#theme-toggle")
+    ratios = page.evaluate("""() => {
+      const parse = value => {
+        const parts = value.match(/[\\d.]+/g).map(Number);
+        return [parts[0], parts[1], parts[2], parts[3] ?? 1];
+      };
+      const composite = (foreground, background) => foreground.slice(0, 3).map(
+        (value, index) => value * foreground[3] + background[index] * (1 - foreground[3])
+      );
+      const luminance = color => {
+        const values = color.slice(0, 3).map(value => {
+          value /= 255;
+          return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
+        });
+        return .2126 * values[0] + .7152 * values[1] + .0722 * values[2];
+      };
+      const contrast = (first, second) => {
+        const a = luminance(first), b = luminance(second);
+        return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+      };
+      const body = parse(getComputedStyle(document.body).backgroundColor);
+      const faint = parse(getComputedStyle(document.querySelector('.top-subtitle')).color);
+      const input = document.querySelector('#search-input');
+      const inputStyle = getComputedStyle(input);
+      const surface = composite(parse(inputStyle.backgroundColor), body);
+      const border = composite(parse(inputStyle.borderTopColor), surface);
+      return {text: contrast(faint, body), boundary: contrast(border, surface)};
+    }""")
+    assert ratios["text"] >= 4.5, ratios
+    assert ratios["boundary"] >= 3, ratios
+
+    tab(page, "topology")
+    for selector in ("#theme-toggle", "#zoom-in", ".button.micro"):
+        target = page.locator(selector).first
+        box = target.bounding_box()
+        assert box and box["width"] >= 24 and box["height"] >= 24, (selector, box)
+
+
+def test_axe_wcag_scan_covers_the_main_states_and_modal_overlays(page: Page) -> None:
+    """axe-core bewaakt beide thema's, alle views en de complexe overlays."""
+    tab(page, "apps")
+    page.click("#new-app-button")
+    page.fill("#app-form input[name=name]", "Axe testapp")
+    page.fill("#app-form input[name=url]", "https://example.test")
+    page.click('#app-form button[type="submit"]')
+    settle(page)
+
+    for theme in ("dark", "light"):
+        current = page.locator("html").get_attribute("data-theme") or "dark"
+        if current != theme:
+            page.click("#theme-toggle")
+        for name in ("patch", "apps", "topology", "admin"):
+            tab(page, name)
+            assert_axe_clean(page, f"{theme} thema, {name}")
+
+    tab(page, "patch")
+    page.locator("[data-device-card] .port-face").first.click()
+    assert_axe_clean(page, "poortlade")
+    page.keyboard.press("Escape")
+    page.click("#new-entity-button")
+    assert_axe_clean(page, "deviceformulier")
+    page.keyboard.press("Escape")
+    page.click("#new-physical-button")
+    assert_axe_clean(page, "netwerkapparaatformulier")
+    page.keyboard.press("Escape")
+
+    tab(page, "apps")
+    page.locator(".app-edit").first.click()
+    assert_axe_clean(page, "appformulier")
+    page.keyboard.press("Escape")
+
+    tab(page, "topology")
+    page.click("#topology-edit")
+    page.locator("#topology-canvas [data-node-id]").first.click()
+    assert_axe_clean(page, "topologienodeformulier")
+    page.keyboard.press("Escape")
+
+    tab(page, "admin")
+    page.locator("[data-provider-edit]").first.click()
+    assert_axe_clean(page, "providerformulier")
+    page.keyboard.press("Escape")
+    page.click("#open-wizard")
+    expect(page.locator("#wizard-dialog")).to_be_visible()
+    assert_axe_clean(page, "setup-wizard")
+
+
+def test_login_error_state_is_axe_clean(page: Page) -> None:
+    page.click("#logout-button")
+    expect(page.locator("#auth-view")).to_be_visible()
+    page.fill("#auth-form input[name=username]", CREDENTIALS["username"])
+    page.fill("#auth-form input[name=password]", "dit wachtwoord is fout")
+    page.click('#auth-form button[type="submit"]')
+    expect(page.locator("#auth-error")).not_to_be_empty()
+    assert_axe_clean(page, "inlogfout")
+
+
+def test_text_spacing_and_320px_reflow_keep_all_views_usable(page: Page) -> None:
+    page.set_viewport_size({"width": 320, "height": 720})
+    page.add_style_tag(content="""
+      * { line-height: 1.5 !important; letter-spacing: .12em !important; word-spacing: .16em !important; }
+      p { margin-bottom: 2em !important; }
+    """)
+    for name in ("patch", "apps", "topology", "admin"):
+        tab(page, name)
+        dimensions = page.evaluate("""() => ({
+          viewport: innerWidth,
+          document: document.documentElement.scrollWidth,
+          headingVisible: Boolean(document.querySelector('.view.active h1')?.getClientRects().length),
+          activeTabVisible: Boolean(document.querySelector('.tab.active')?.getClientRects().length)
+        })""")
+        assert dimensions["document"] <= dimensions["viewport"], (name, dimensions)
+        assert dimensions["headingVisible"] and dimensions["activeTabVisible"], (name, dimensions)

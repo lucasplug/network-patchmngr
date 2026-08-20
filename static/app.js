@@ -82,6 +82,8 @@ async function api(path, options = {}) {
 function toast(message, type = "success") {
   const item = document.createElement("div");
   item.className = `toast ${type}`;
+  item.setAttribute("role", type === "error" ? "alert" : "status");
+  item.setAttribute("aria-live", type === "error" ? "assertive" : "polite");
   item.textContent = message;
   $("#toast-stack").append(item);
   setTimeout(() => item.remove(), 4200);
@@ -207,7 +209,8 @@ function renderAll() {
   renderSpeedtest();
 }
 
-function statusDot(status) { return `<i class="status-dot ${["up","down","degraded"].includes(status) ? status : "unknown"}"></i>`; }
+function statusDot(status) { return `<i class="status-dot ${["up","down","degraded"].includes(status) ? status : "unknown"}" aria-hidden="true"></i>`; }
+function statusLabel(status) { return ({up:"up",down:"down",degraded:"verminderd",unknown:"onbekend"})[status] || "onbekend"; }
 
 function renderSummary() {
   const c = state.data.counts;
@@ -236,7 +239,7 @@ function portLabelFor(port) {
 function portFace(port, device) {
   const status = port.entity_id ? (port.entity_status || "unknown") : "free";
   const tip = `${device.name} · poort ${port.number}${port.side === "rear" ? " (achter)" : ""}: ${portLabelFor(port)}${port.cable_label ? ` · kabel ${port.cable_label}` : ""}`;
-  return `<button class="port-face ${port.cable_id ? "occupied" : ""} status-${esc(status)}"
+  return `<button type="button" class="port-face ${port.cable_id ? "occupied" : ""} status-${esc(status)}"
       data-port-id="${esc(port.id)}" data-device-id="${esc(device.id)}" data-drop-port="${esc(port.id)}"
       ${port.cable_id ? 'draggable="true"' : ""} title="${esc(tip)}" aria-label="${esc(tip)}">
     <span class="face-num">${String(port.number).padStart(2, "0")}${port.side === "rear" ? "r" : ""}</span>
@@ -252,14 +255,16 @@ function deviceFace(device) {
     <article class="device-card" data-device-card="${esc(device.id)}">
       <header class="device-head">
         <div><div class="device-title">${device.monitor_entity_id
-          ? `<button class="status-button" data-device-history="${esc(device.id)}" title="Uptime van ${esc(device.monitor_name || "de monitor")}">${statusDot(device.status)}</button>`
+          ? `<button type="button" class="status-button" data-device-history="${esc(device.id)}" title="Uptime van ${esc(device.monitor_name || "de monitor")}" aria-label="${esc(device.name)}: status ${esc(statusLabel(device.status))}; uptime openen">${statusDot(device.status)}</button>`
           : statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
-        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button class="icon-button" data-physical-edit="${device.id}" title="Bewerken" aria-label="${esc(device.name)} bewerken">✎</button><button class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
+        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button type="button" class="icon-button" data-physical-edit="${device.id}" title="Bewerken" aria-label="${esc(device.name)} bewerken">✎</button><button type="button" class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
       </header>
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
       ${rears.length ? `<div class="front-label">achterzijde</div><div class="device-front rear">${rears.map(port => portFace(port, device)).join("")}</div>` : ""}
-      <div class="port-legend">${device.ports.filter(port => port.cable_id).slice(0, 6).map(port =>
-        `<span class="legend-item"${port.entity_id ? ` data-entity-open="${esc(port.entity_id)}" role="button" tabindex="0"` : ""}><i style="background:${cableColor(port.cable_color)}"></i>${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""} ${esc(shorten(portLabelFor(port), 22))}</span>`).join("") || `<span class="muted tiny">Nog niets gepatcht — sleep een device op een poort of klik erop.</span>`}</div>
+      <div class="port-legend">${device.ports.filter(port => port.cable_id).slice(0, 6).map(port => {
+        const content=`<i style="background:${cableColor(port.cable_color)}"></i>${String(port.number).padStart(2,"0")}${port.side === "rear" ? "r" : ""} ${esc(shorten(portLabelFor(port), 22))}`;
+        return port.entity_id ? `<button type="button" class="legend-item" data-entity-open="${esc(port.entity_id)}">${content}</button>` : `<span class="legend-item">${content}</span>`;
+      }).join("") || `<span class="muted tiny">Nog niets gepatcht — sleep een device op een poort of klik erop.</span>`}</div>
     </article>`;
 }
 
@@ -270,7 +275,7 @@ function renderPatch() {
   renderUnpatched();
   const manual=state.data.entities.filter(entity=>entity.origin==="manual");
   $("#manual-entity-count").textContent=`${manual.length} devices`;
-  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong class="link" data-entity-open="${esc(entity.id)}" role="button" tabindex="0">${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-entity-edit="${entity.id}">Wijzig</button><button class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
+  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><button type="button" class="link" data-entity-open="${esc(entity.id)}">${esc(entity.name)}</button><span>${esc(categoryLabel(entity.type))} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-entity-edit="${entity.id}">Wijzig</button><button type="button" class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
 }
 
 // Zijlijst: devices zonder kabel, sleepbaar naar een poort.
@@ -290,11 +295,11 @@ function renderUnpatched() {
   // Eerder verdween hij stil zodra je de lade sloot zonder op te slaan.
   const pending = state.pendingEntityId && state.data.entities.find(item => item.id === state.pendingEntityId);
   $("#pending-link").innerHTML = pending
-    ? `Kies een poort voor <strong>${esc(pending.name)}</strong> <button class="button micro" id="cancel-pending">Annuleren</button>`
+    ? `Kies een poort voor <strong>${esc(pending.name)}</strong> <button type="button" class="button micro" id="cancel-pending">Annuleren</button>`
     : "";
   $("#pending-link").classList.toggle("hidden", !pending);
   $("#unpatched-list").innerHTML = free.length ? free.map(entity => `
-    <button class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
+    <button type="button" class="chip-device" draggable="true" data-drag-entity="${esc(entity.id)}" title="Sleep op een poort of klik om te koppelen">
       ${statusDot(entity.status)}<span>${esc(entity.name)}</span><small>${esc(entity.vendor || entity.ip_address || categoryLabel(entity.type))}</small>
     </button>`).join("") : `<div class="empty-state">Alles is gekoppeld.</div>`;
 }
@@ -434,7 +439,22 @@ function renderTopology() {
   applyViewBox();
   svg.classList.toggle("editing", state.editingTopology);
   svg.innerHTML = `${edgeMarkup}${labelMarkup}${groupMarkup}${nodeMarkup}`;
+  renderTopologyText(visible, relations, byId, {showPhysical, showVirtual, showServices});
   updateSelectionUI();
+}
+
+function renderTopologyText(nodes, relations, byId, layers) {
+  const visibleRelations = relations.filter(relation => {
+    if (!byId.has(relation.from_node_id) || !byId.has(relation.to_node_id)) return false;
+    if (relation.source === "patch" && !layers.showPhysical) return false;
+    const service = relation.relation_type === "service" || relation.relation_type === "dependency";
+    if (service && !layers.showServices) return false;
+    return relation.source === "patch" || service || layers.showVirtual;
+  });
+  const parentNames = new Map(nodes.map(node => [node.id, node.label]));
+  const nodeRows = nodes.map(node => `<tr><td>${esc(node.label)}</td><td>${esc(statusLabel(node.status))}</td><td>${esc(node.subtitle || node.node_type)}</td><td>${esc(parentNames.get(node.parent_node_id) || "—")}</td><td>${esc(({active:"actief",planned:"gepland",phase_out:"uitfaseren"})[node.lifecycle] || node.lifecycle || "actief")}</td></tr>`).join("");
+  const relationRows = visibleRelations.map(relation => `<tr><td>${esc(byId.get(relation.from_node_id).label)}</td><td>${esc(byId.get(relation.to_node_id).label)}</td><td>${esc(relation.label || relation.relation_type)}</td><td>${esc(relation.source === "patch" ? "fysiek" : relation.relation_type)}</td></tr>`).join("");
+  $("#topology-text-summary").innerHTML = `<div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Nodes in de topologie</caption><thead><tr><th scope="col">Node</th><th scope="col">Status</th><th scope="col">Type</th><th scope="col">Parent</th><th scope="col">Levenscyclus</th></tr></thead><tbody>${nodeRows || '<tr><td colspan="5">Geen nodes zichtbaar.</td></tr>'}</tbody></table></div><div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Zichtbare relaties in de topologie</caption><thead><tr><th scope="col">Van</th><th scope="col">Naar</th><th scope="col">Relatie</th><th scope="col">Laag</th></tr></thead><tbody>${relationRows || '<tr><td colspan="4">Geen relaties zichtbaar.</td></tr>'}</tbody></table></div>`;
 }
 
 function autoTopologyLayout(nodes, children) {
@@ -465,27 +485,27 @@ function autoTopologyLayout(nodes, children) {
 
 function topoGroup(node, p) {
   const status=node.status||"unknown";
-  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)} bewerken"`:"";
+  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)}, status ${esc(statusLabel(status))}, bewerken"`:"";
   return `<g class="topo-node topo-container lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}"${interaction} transform="translate(${p.x} ${p.y})">
     <rect class="topo-group" width="${p.width}" height="${p.height}" rx="16"/>
     <text class="topo-group-title" x="18" y="25">${esc(shorten(node.label,38))}</text>
     <text class="topo-sub" x="18" y="42">${esc(shorten(node.subtitle||node.node_type,48))}</text>
-    <circle cx="${p.width-16}" cy="17" r="5" class="status-fill ${esc(status)}"/>
+    <text class="topo-status ${esc(status)}" x="${p.width-14}" y="24" text-anchor="end">${esc(statusLabel(status))}</text>
   </g>`;
 }
 
 function topoNode(node, p) {
-  const colors = {up:"#3ddc97",down:"#ff6262",degraded:"#ffb454",unknown:"#667282"};
-  const color = colors[node.status] || colors.unknown, metrics=node.metrics||{};
+  const metrics=node.metrics||{};
   const cpu=metrics.cpu_percent!==undefined&&metrics.cpu_percent!==null?Math.max(0,Math.min(100,Number(metrics.cpu_percent))):null;
   const figure = keyFigure(node, metrics);
-  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)} bewerken"`:"";
+  const status=node.status||"unknown";
+  const interaction=state.editingTopology?` role="button" tabindex="0" aria-label="${esc(node.label)}, status ${esc(statusLabel(status))}, bewerken"`:"";
   return `<g class="topo-node lifecycle-${esc(node.lifecycle)} ${state.selectedNodes.has(node.id)?"selected":""}" data-node-id="${esc(node.id)}"${interaction} transform="translate(${p.x} ${p.y})">
     <rect class="topo-rect" width="${p.width}" height="${p.height}" rx="10"/>
-    <text class="topo-title" x="12" y="22">${esc(shorten(node.label, 23))}</text>
+    <text class="topo-title" x="12" y="22">${esc(shorten(node.label, 17))}</text>
     <text class="topo-sub" x="12" y="41">${esc(shorten(node.subtitle, 27))}</text>
     ${figure ? `<text class="topo-figure" x="${p.width-14}" y="41" text-anchor="end">${esc(figure)}</text>` : ""}
-    <circle cx="${p.width-14}" cy="14" r="5" fill="${color}"/>
+    <text class="topo-status ${esc(status)}" x="${p.width-12}" y="22" text-anchor="end">${esc(statusLabel(status))}</text>
     ${cpu===null?"":`<rect class="metric-track" x="12" y="${p.height-9}" width="${p.width-24}" height="3" rx="2"/><rect class="metric-fill" x="12" y="${p.height-9}" width="${(p.width-24)*cpu/100}" height="3" rx="2"/>`}
   </g>`;
 }
@@ -514,27 +534,27 @@ function renderAdmin() {
       <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(PROVIDER_TYPE_LABELS[provider.type] || provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "gereed") : "uit"}</span></div>
       <div class="provider-details"><div><span>Laatste succes</span><b>${formatTime(provider.last_success_at)}</b></div><div><span>Interval</span><b>${provider.poll_interval_seconds}s</b></div></div>
       ${provider.last_error ? `<p class="form-error tiny" title="${esc(provider.last_error)}">${esc(shorten(provider.last_error, 62))}</p>` : ""}
-      <div class="provider-actions"><button class="button" data-provider-edit="${provider.id}">Configureren</button><button class="button" data-provider-sync="${provider.id}">Nu ophalen</button>${
+      <div class="provider-actions"><button type="button" class="button" data-provider-edit="${provider.id}">Configureren</button><button type="button" class="button" data-provider-sync="${provider.id}">Nu ophalen</button>${
         state.data.providers.filter(item => item.type === provider.type).length > 1
-          ? `<button class="button danger" data-provider-delete="${provider.id}">Verwijder</button>` : ""}</div>
+          ? `<button type="button" class="button danger" data-provider-delete="${provider.id}">Verwijder</button>` : ""}</div>
     </article>`;
   }).join("");
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
   $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button class="button" data-link-entity="${entity.id}">Poort</button><button class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
+    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#uplink-count").textContent = `${uplinked.length} gekoppeld`;
   $("#uplinks-list").innerHTML = uplinked.length ? uplinked.map(entity => `
-    <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
+    <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button type="button" class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
   $("#inactive-discovery-count").textContent=`${inactive.length} items`;
-  $("#inactive-discoveries-list").innerHTML=inactive.length?inactive.map(entity=>`<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${entity.archived?"gearchiveerd":"genegeerd"}</span></div></div><div>${esc(entity.ip_address||entity.hostname||"—")}</div><div>${statusDot(entity.status)} ${esc(entity.status)}</div><button class="button" data-discovery-state="restore" data-entity-id="${entity.id}">Herstellen</button></div>`).join(""):`<div class="empty-state">Geen genegeerde of gearchiveerde discoveries.</div>`;
+  $("#inactive-discoveries-list").innerHTML=inactive.length?inactive.map(entity=>`<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${entity.archived?"gearchiveerd":"genegeerd"}</span></div></div><div>${esc(entity.ip_address||entity.hostname||"—")}</div><div>${statusDot(entity.status)} ${esc(entity.status)}</div><button type="button" class="button" data-discovery-state="restore" data-entity-id="${entity.id}">Herstellen</button></div>`).join(""):`<div class="empty-state">Geen genegeerde of gearchiveerde discoveries.</div>`;
   const mappings=(state.data.provider_records||[]).slice(0,250);$("#mapping-count").textContent=`${state.data.provider_records?.length||0} records`;
-  $("#provider-mappings-list").innerHTML=mappings.length?mappings.map(record=>`<div class="data-row mapping-row"><div class="data-main"><span class="data-icon">${providerIcon((state.data.providers.find(p=>p.id===record.provider_id)||{}).type)}</span><div><strong>${esc(record.external_id)}</strong><span>${esc(record.provider_name)} · ${esc(record.kind)}</span></div></div><div>${esc(record.entity_name||"niet gekoppeld")}</div><div>${formatTime(record.last_seen_at)}</div><button class="button" data-mapping-edit="${record.id}">Koppelen</button></div>`).join(""):`<div class="empty-state">Nog geen providerrecords.</div>`;
+  $("#provider-mappings-list").innerHTML=mappings.length?mappings.map(record=>`<div class="data-row mapping-row"><div class="data-main"><span class="data-icon">${providerIcon((state.data.providers.find(p=>p.id===record.provider_id)||{}).type)}</span><div><strong>${esc(record.external_id)}</strong><span>${esc(record.provider_name)} · ${esc(record.kind)}</span></div></div><div>${esc(record.entity_name||"niet gekoppeld")}</div><div>${formatTime(record.last_seen_at)}</div><button type="button" class="button" data-mapping-edit="${record.id}">Koppelen</button></div>`).join(""):`<div class="empty-state">Nog geen providerrecords.</div>`;
   const openConflicts = state.data.conflicts.filter(item => item.status === "open");
   $("#conflict-count").textContent = openConflicts.length;
-  $("#conflicts-list").innerHTML = openConflicts.length ? openConflicts.map(conflict => `<div class="mini-item"><strong>${esc(conflict.entity_name || "Onbekend device")} · ${esc(conflict.field)}</strong><p>Handmatig: ${esc(conflict.manual_value)}<br>${esc(conflict.provider_name)}: ${esc(conflict.observed_value)}</p><button class="button" data-resolve-conflict="${conflict.id}">Handmatig behouden</button></div>`).join("") : `<div class="empty-state">Geen open conflicten.</div>`;
-  $("#backups-list").innerHTML = state.data.backups.length ? state.data.backups.slice(0,8).map(backup => `<div class="mini-item"><strong>${esc(backup.name)}</strong>${backup.portable ? ' <span class="pill">draagbaar</span>' : ""}<p>${formatTime(backup.created_at)} · ${formatBytes(backup.size)}</p><div class="row-actions"><a class="button" href="/api/backups/${encodeURIComponent(backup.name)}/download">Download</a><button class="button danger" data-backup-restore="${esc(backup.name)}">Herstel</button></div></div>`).join("") : `<div class="empty-state">Nog geen back-up gemaakt.</div>`;
+  $("#conflicts-list").innerHTML = openConflicts.length ? openConflicts.map(conflict => `<div class="mini-item"><strong>${esc(conflict.entity_name || "Onbekend device")} · ${esc(conflict.field)}</strong><p>Handmatig: ${esc(conflict.manual_value)}<br>${esc(conflict.provider_name)}: ${esc(conflict.observed_value)}</p><button type="button" class="button" data-resolve-conflict="${conflict.id}">Handmatig behouden</button></div>`).join("") : `<div class="empty-state">Geen open conflicten.</div>`;
+  $("#backups-list").innerHTML = state.data.backups.length ? state.data.backups.slice(0,8).map(backup => `<div class="mini-item"><strong>${esc(backup.name)}</strong>${backup.portable ? ' <span class="pill">draagbaar</span>' : ""}<p>${formatTime(backup.created_at)} · ${formatBytes(backup.size)}</p><div class="row-actions"><a class="button" href="/api/backups/${encodeURIComponent(backup.name)}/download">Download</a><button type="button" class="button danger" data-backup-restore="${esc(backup.name)}">Herstel</button></div></div>`).join("") : `<div class="empty-state">Nog geen back-up gemaakt.</div>`;
   const entityNames=new Map(state.data.entities.map(entity=>[entity.id,entity.name]));
-  $("#dns-list").innerHTML = state.data.dns_records.length ? state.data.dns_records.map(record=>`<div class="data-row dns-row"><div class="data-main"><span class="data-icon">DNS</span><div><strong>${esc(record.name)}</strong><span>${esc(record.source)}${record.entity_id?` · ${esc(entityNames.get(record.entity_id)||"device")}`:""}</span></div></div><div><span class="data-cell-label">Type</span><br>${esc(record.record_type)}</div><div><span class="data-cell-label">Waarde</span><br>${esc(record.value)}</div>${record.source==="manual"?`<div class="row-actions"><button class="button" data-dns-edit="${record.id}">Wijzig</button><button class="button danger" data-dns-delete="${record.id}" aria-label="${esc(record.name)} verwijderen">Verwijder</button></div>`:`<span class="pill">read-only</span>`}</div>`).join("") : `<div class="empty-state">Nog geen DNS-records. Voeg er één toe of synchroniseer AdGuard Home.</div>`;
+  $("#dns-list").innerHTML = state.data.dns_records.length ? state.data.dns_records.map(record=>`<div class="data-row dns-row"><div class="data-main"><span class="data-icon">DNS</span><div><strong>${esc(record.name)}</strong><span>${esc(record.source)}${record.entity_id?` · ${esc(entityNames.get(record.entity_id)||"device")}`:""}</span></div></div><div><span class="data-cell-label">Type</span><br>${esc(record.record_type)}</div><div><span class="data-cell-label">Waarde</span><br>${esc(record.value)}</div>${record.source==="manual"?`<div class="row-actions"><button type="button" class="button" data-dns-edit="${record.id}">Wijzig</button><button type="button" class="button danger" data-dns-delete="${record.id}" aria-label="${esc(record.name)} verwijderen">Verwijder</button></div>`:`<span class="pill">read-only</span>`}</div>`).join("") : `<div class="empty-state">Nog geen DNS-records. Voeg er één toe of synchroniseer AdGuard Home.</div>`;
   $("#proxy-count").textContent=`${state.data.proxy_hosts.length} hosts`;
   $("#proxy-list").innerHTML = state.data.proxy_hosts.length ? state.data.proxy_hosts.map(host=>`<div class="data-row proxy-row"><div class="data-main"><span class="data-icon">↗</span><div><strong>${esc((host.domains||[]).join(", ")||"Naamloos")}</strong><span>Nginx Proxy Manager · read-only</span></div></div><div><span class="data-cell-label">Doel</span><br>${esc(host.forward_scheme)}://${esc(host.forward_host)}:${host.forward_port||"—"}</div><div><span class="data-cell-label">Status</span><br>${statusDot(host.enabled?"up":"down")} ${host.enabled?"actief":"uit"}</div><span class="pill">${esc(entityNames.get(host.entity_id)||"niet gekoppeld")}</span></div>`).join("") : `<div class="empty-state">Nog geen proxyhosts. Configureer en synchroniseer Nginx Proxy Manager.</div>`;
   $("#audit-list").innerHTML=(state.data.audit_log||[]).length?state.data.audit_log.map(item=>`<div class="data-row audit-row"><div class="data-main"><span class="data-icon">⌁</span><div><strong>${esc(item.action)}</strong><span>${esc(item.username||"systeem")} · ${esc(item.target_type)}</span></div></div><div>${esc(item.target_id||"—")}</div><div>${formatTime(item.created_at)}</div></div>`).join(""):`<div class="empty-state">Nog geen beheeracties.</div>`;
@@ -576,6 +596,7 @@ function renderSpeedtest() {
   [["down","download_mbps"],["up","upload_mbps"],["ping","ping_ms"],["jitter","jitter_ms"]].forEach(([id,key])=>$("#speed-detail-"+id).textContent=latest?fmt(latest[key]):"—");
   const history=(speed.history||[]).slice(0,24).reverse(), max=Math.max(1,...history.map(item=>Number(item.download_mbps)||0));
   $("#speed-chart").innerHTML=history.length?history.map(item=>`<div class="speed-bar-wrap" title="${esc(formatTime(item.completed_at))}: ↓ ${fmt(item.download_mbps)} / ↑ ${fmt(item.upload_mbps)} Mbps"><i class="speed-bar" style="height:${Math.max(3,(Number(item.download_mbps)||0)/max*100)}%"></i></div>`).join(""):`<div class="empty-state">Na de eerste test verschijnt hier de historie.</div>`;
+  $("#speed-history-text").innerHTML=history.length?`<div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Speedtesthistorie</caption><thead><tr><th scope="col">Tijd</th><th scope="col">Download (Mbps)</th><th scope="col">Upload (Mbps)</th><th scope="col">Ping (ms)</th><th scope="col">Jitter (ms)</th></tr></thead><tbody>${history.map(item=>`<tr><td>${esc(formatTime(item.completed_at))}</td><td>${esc(fmt(item.download_mbps))}</td><td>${esc(fmt(item.upload_mbps))}</td><td>${esc(fmt(item.ping_ms))}</td><td>${esc(fmt(item.jitter_ms))}</td></tr>`).join("")}</tbody></table></div>`:`<p class="empty-table">Na de eerste test verschijnt hier de historie.</p>`;
   $("#speed-settings-summary").innerHTML=`<div class="mini-item"><strong>${settings.enabled?"Automatisch actief":"Automatisch uit"}</strong><p>${formatInterval(settings.interval_seconds)} · ${settings.duration_seconds||10}s testduur<br>${settings.last_error?esc(shorten(settings.last_error,90)):"Telemetry uit · lokaal opgeslagen"}</p></div>`;
 }
 
@@ -622,10 +643,8 @@ function openPort(portId, deviceId) {
   renderTrace(port);
   const drawer = $("#port-drawer");
   portDrawerReturnFocus = document.activeElement;
-  $("#drawer-backdrop").classList.remove("hidden");
-  drawer.removeAttribute("inert");
+  if (!drawer.open) drawer.showModal();
   drawer.classList.add("open");
-  drawer.setAttribute("aria-hidden", "false");
   requestAnimationFrame(() => $("#port-drawer .drawer-close").focus());
 }
 
@@ -656,14 +675,22 @@ async function renderTrace(port) {
 }
 
 function closeDrawer() {
-  $("#drawer-backdrop").classList.add("hidden");
   const drawer = $("#port-drawer");
   drawer.classList.remove("open");
-  drawer.setAttribute("aria-hidden", "true");
-  drawer.setAttribute("inert", "");
+  if (drawer.open) drawer.close();
   const target = portDrawerReturnFocus;
   portDrawerReturnFocus = null;
   if (target?.isConnected) requestAnimationFrame(() => target.focus());
+}
+
+function trapDialogFocus(event) {
+  if (event.key !== "Tab") return;
+  const dialog=event.currentTarget;
+  const focusable=$$('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])',dialog).filter(element=>element.getClientRects().length);
+  if (!focusable.length) return;
+  const first=focusable[0],last=focusable[focusable.length-1];
+  if (event.shiftKey && (document.activeElement===first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement===last) { event.preventDefault(); first.focus(); }
 }
 
 /* --------------------------------------------------------------- zoeken */
@@ -684,7 +711,7 @@ async function runSearch(term) {
   try {
     const rows = await api(`/api/search?q=${encodeURIComponent(term)}`);
     box.innerHTML = rows.length ? rows.map(row => `
-      <button class="search-hit" data-hit-kind="${esc(row.kind)}" data-hit-id="${esc(row.id)}" data-hit-goto="${esc(row.goto)}">
+      <button type="button" class="search-hit" data-hit-kind="${esc(row.kind)}" data-hit-id="${esc(row.id)}" data-hit-goto="${esc(row.goto)}">
         <span class="search-kind">${row.kind === "app" ? "app" : row.kind === "physical" ? "apparaat" : "device"}</span>
         <span class="search-label">${esc(row.label)}</span>
         <span class="search-sub">${esc(row.sub || "")}</span>
@@ -711,14 +738,9 @@ document.addEventListener("click", event => {
   if (!event.target.closest(".search-box")) $("#search-results").classList.add("hidden");
 });
 
-// Een <dialog> sluit vanzelf met Escape; de lades zijn gewone divs met een
-// backdrop die de hele interface blokkeert. Zonder dit zit je vast tot je de
-// juiste × vindt.
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   if (!$("#search-results").classList.contains("hidden")) { $("#search-results").classList.add("hidden"); return; }
-  if ($("#entity-drawer")?.classList.contains("open")) { closeEntityDrawer(); return; }
-  if ($("#port-drawer")?.classList.contains("open")) closeDrawer();
 });
 
 /* ------------------------------------------------- recente veranderingen */
@@ -786,12 +808,14 @@ function renderApps() {
     <section class="app-group">
       <div class="section-bar"><span>${esc(group)}</span><span class="muted">${items.length}</span></div>
       <div class="app-cards">${items.map(link => `
-        <a class="app-card glass" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">
+        <article class="app-card glass">
+          <a class="app-card-link" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">
           <span class="app-icon">${esc(link.icon || link.name.slice(0, 2).toUpperCase())}</span>
           <span class="app-body"><strong>${esc(link.name)}</strong><small>${esc(link.description || hostOf(link.url))}</small></span>
-          <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}</span>
-          <button class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>
-        </a>`).join("")}</div>
+          <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}<span class="sr-only">status ${esc(statusLabel(link.status))}</span></span>
+          </a>
+          <button type="button" class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>
+        </article>`).join("")}</div>
     </section>`).join("");
 }
 
@@ -816,8 +840,6 @@ $("#new-app-button").addEventListener("click", () => openApp());
 $("#apps-grid").addEventListener("click", event => {
   const edit = event.target.closest("[data-app-edit]");
   if (!edit) return;
-  // De kaart is één grote link; bewerken mag hem niet openen.
-  event.preventDefault();
   openApp(edit.dataset.appEdit);
 });
 
@@ -1049,6 +1071,21 @@ function openTopologyNode(nodeId) {
   $("#topology-node-dialog").showModal();
 }
 
+async function nudgeTopologyNode(button) {
+  const nodeId=$("#topology-node-form").elements.node_id.value;
+  const position=state.topologyPositions.get(nodeId);
+  if(!position)return;
+  const x=position.x+Number(button.dataset.nudgeX||0)*24;
+  const y=position.y+Number(button.dataset.nudgeY||0)*24;
+  button.disabled=true;
+  try{
+    await api(`/api/topology/nodes/${encodeURIComponent(nodeId)}/position`,{method:"PATCH",body:JSON.stringify({x,y})});
+    await loadData(true);
+    toast("Node verplaatst");
+  }catch(error){toast(error.message,"error");}
+  finally{button.disabled=false;}
+}
+
 function openDns(recordId="") {
   const record=recordId?state.data.dns_records.find(item=>item.id===recordId):null, form=$("#dns-form"); form.reset(); form.dataset.recordId=recordId;
   form.elements.entity_id.innerHTML=`<option value="">Geen</option>${state.data.entities.map(entity=>`<option value="${entity.id}">${esc(entity.name)}</option>`).join("")}`;
@@ -1194,7 +1231,8 @@ $("#new-entity-button").addEventListener("click", () => openEntity());
 $("#new-physical-button").addEventListener("click", () => openPhysical());
 $$('.modal-close').forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 $$("#port-drawer .drawer-close").forEach(button => button.addEventListener("click", closeDrawer));
-$("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#port-drawer").addEventListener("cancel", event => { event.preventDefault(); closeDrawer(); });
+$("#port-drawer").addEventListener("keydown", trapDialogFocus);
 $("#pending-link").addEventListener("click", event => {
   if (!event.target.closest("#cancel-pending")) return;
   state.pendingEntityId = null;
@@ -1313,6 +1351,7 @@ $("#topology-relation-form").addEventListener("submit",async event=>{event.preve
 $("#delete-topology-relation").addEventListener("click",async()=>{const form=$("#topology-relation-form"),relationId=form.elements.relation_id.value;if(!relationId)return;if(!(await confirmAction({title:"Relatie verwijderen?",message:"Alleen deze handmatige relatie wordt verwijderd; de verbonden apparaten blijven bestaan.",confirmLabel:"Relatie verwijderen"})))return;try{await api(`/api/topology/relations/${encodeURIComponent(relationId)}`,{method:"DELETE"});form.closest("dialog").close();await loadData(true);toast("Relatie verwijderd");}catch(error){toast(error.message,"error");}});
 $("#open-topology-source").addEventListener("click",()=>{const button=$("#open-topology-source");$("#topology-node-dialog").close();if(button.dataset.kind==="physical")openPhysical(button.dataset.id);else openEntity(button.dataset.id);});
 $("#delete-topology-group").addEventListener("click",async()=>{const form=$("#topology-node-form"),node=state.data.topology.nodes.find(item=>item.id===form.elements.node_id.value);if(node&&await confirmAction({title:"Topologiegroep verwijderen?",message:`${node.label} wordt verwijderd. Kinderen worden uit de groep gehaald maar blijven bestaan.`,confirmLabel:"Groep verwijderen"})){try{await api(`/api/topology/groups/${encodeURIComponent(node.id)}?confirm=${encodeURIComponent(node.label)}`,{method:"DELETE"});form.closest("dialog").close();state.selectedNodes.delete(node.id);await loadData(true);toast("Groep verwijderd");}catch(error){toast(error.message,"error");}}});
+$$("[data-nudge-x],[data-nudge-y]").forEach(button=>button.addEventListener("click",()=>nudgeTopologyNode(button)));
 
 $("#new-dns-record").addEventListener("click",()=>openDns());
 $("#dns-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.ttl=payload.ttl?Number(payload.ttl):null;payload.entity_id=payload.entity_id||null;payload.enabled=true;const path=form.dataset.recordId?`/api/dns-records/${form.dataset.recordId}`:"/api/dns-records";try{await api(path,{method:form.dataset.recordId?"PATCH":"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("DNS-record opgeslagen");}catch(error){toast(error.message,"error");}});
@@ -1434,8 +1473,8 @@ function renderWizardProviders() {
       }</select><small class="muted">Meer machines voeg je toe in Admin → Glances → Configureren.</small></label>` : ""}
       ${fields.map(field => `<label class="tiny">${esc(field.label)}<input data-wizard-cred="${esc(field.key)}" type="${field.type === "password" ? "password" : "text"}" autocomplete="new-password"></label>`).join("")}
       <div class="provider-actions">
-        <button class="button" data-wizard-test="${esc(id)}">Test verbinding</button>
-        <button class="button primary" data-wizard-save="${esc(id)}" disabled>Opslaan en ophalen</button>
+        <button type="button" class="button" data-wizard-test="${esc(id)}">Test verbinding</button>
+        <button type="button" class="button primary" data-wizard-save="${esc(id)}" disabled>Opslaan en ophalen</button>
       </div>
       <p class="tiny wizard-result"></p>
     </article>`;
@@ -1724,13 +1763,13 @@ function sparkline(values, {height = 26, suffix = ""} = {}) {
   const max = Math.max(...points, 1), min = Math.min(...points, 0), span = max - min || 1;
   const step = 100 / (points.length - 1);
   const path = points.map((value, index) => `${index === 0 ? "M" : "L"}${(index * step).toFixed(1)} ${(height - (value - min) / span * height).toFixed(1)}`).join(" ");
-  return `<svg class="spark" viewBox="0 0 100 ${height}" preserveAspectRatio="none" role="img" aria-label="verloop"><path d="${path}"/></svg>
+  return `<svg class="spark" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true"><path d="${path}"/></svg>
     <span class="spark-value">${points[points.length - 1].toFixed(1)}${suffix}</span>`;
 }
 
 function uptimeBar(days) {
   if (!days.length) return `<span class="muted tiny">nog geen dagen gemeten</span>`;
-  return `<div class="uptime-bar">${days.map(day => {
+  return `<div class="uptime-bar" aria-hidden="true">${days.map(day => {
     const ratio = day.samples_total ? day.samples_up / day.samples_total : 0;
     const level = ratio >= 0.999 ? "full" : ratio >= 0.95 ? "high" : ratio > 0 ? "low" : "none";
     return `<i class="uptime-day ${level}" title="${esc(day.day)}: ${(ratio * 100).toFixed(1)}% up${day.flips ? ` · ${day.flips} wissel(s)` : ""}"></i>`;
@@ -1748,27 +1787,32 @@ async function openEntityDrawer(entityId) {
     ["Vendor", entity.vendor || "—"], ["Laatst gezien", formatTime(entity.last_seen_at)],
   ].map(([label, value]) => `<div><span class="data-cell-label">${label}</span><br>${esc(value)}</div>`).join("");
   $("#entity-drawer-cable").innerHTML = port
-    ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
+    ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button type="button" class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
   const drawer = $("#entity-drawer");
   entityDrawerReturnFocus = document.activeElement;
-  $("#entity-drawer-backdrop").classList.remove("hidden");
-  drawer.removeAttribute("inert");
+  if (!drawer.open) drawer.showModal();
   drawer.classList.add("open");
-  drawer.setAttribute("aria-hidden", "false");
   requestAnimationFrame(() => $("#entity-drawer .drawer-close").focus());
   try {
     const history = await api(`/api/entities/${encodeURIComponent(entityId)}/history`);
     const samples = history.samples;
+    const dayRows = history.days.map(day => {
+      const ratio = day.samples_total ? day.samples_up / day.samples_total * 100 : 0;
+      return `<tr><td>${esc(day.day)}</td><td>${ratio.toFixed(1)}%</td><td>${esc(day.flips)}</td></tr>`;
+    }).join("");
+    const sampleRows = samples.map(sample => `<tr><td>${esc(formatTime(sample.sampled_at))}</td><td>${esc(statusLabel(sample.status))}</td><td>${sample.cpu_percent ?? "—"}</td><td>${sample.memory_percent ?? "—"}</td><td>${sample.latency_ms ?? "—"}</td></tr>`).join("");
     $("#entity-drawer-history").innerHTML = `
       <div class="history-block"><span class="data-cell-label">Uptime laatste 30 dagen</span>
         <div class="uptime-head"><b>${history.uptime_percent === null ? "—" : `${history.uptime_percent}%`}</b><span class="muted tiny">${history.flips} statuswissel(s)</span></div>
-        ${uptimeBar(history.days)}</div>
+        ${uptimeBar(history.days)}
+        <details class="data-alternative"><summary>Uptime als tabel</summary><div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Uptime per dag</caption><thead><tr><th scope="col">Datum</th><th scope="col">Uptime</th><th scope="col">Statuswissels</th></tr></thead><tbody>${dayRows || '<tr><td colspan="3">Nog geen dagen gemeten.</td></tr>'}</tbody></table></div></details></div>
       <div class="history-block"><span class="data-cell-label">Laatste 48 uur</span>
         <div class="spark-row"><span>cpu</span>${sparkline(samples.map(item => item.cpu_percent), {suffix:"%"})}</div>
         <div class="spark-row"><span>mem</span>${sparkline(samples.map(item => item.memory_percent), {suffix:"%"})}</div>
         <div class="spark-row"><span>ping</span>${sparkline(samples.map(item => item.latency_ms), {suffix:" ms"})}</div>
+        <details class="data-alternative"><summary>Metingen als tabel</summary><div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Metingen van de laatste 48 uur</caption><thead><tr><th scope="col">Tijd</th><th scope="col">Status</th><th scope="col">CPU %</th><th scope="col">Geheugen %</th><th scope="col">Ping ms</th></tr></thead><tbody>${sampleRows || '<tr><td colspan="5">Nog geen metingen.</td></tr>'}</tbody></table></div></details>
       </div>`;
   } catch (error) {
     $("#entity-drawer-history").innerHTML = `<span class="muted tiny">${esc(error.message)}</span>`;
@@ -1776,18 +1820,17 @@ async function openEntityDrawer(entityId) {
 }
 
 function closeEntityDrawer() {
-  $("#entity-drawer-backdrop").classList.add("hidden");
   const drawer = $("#entity-drawer");
   drawer.classList.remove("open");
-  drawer.setAttribute("aria-hidden", "true");
-  drawer.setAttribute("inert", "");
+  if (drawer.open) drawer.close();
   const target = entityDrawerReturnFocus;
   entityDrawerReturnFocus = null;
   if (target?.isConnected) requestAnimationFrame(() => target.focus());
 }
 
-$("#entity-drawer-backdrop").addEventListener("click", closeEntityDrawer);
 $$("#entity-drawer .drawer-close").forEach(button => button.addEventListener("click", closeEntityDrawer));
+$("#entity-drawer").addEventListener("cancel", event => { event.preventDefault(); closeEntityDrawer(); });
+$("#entity-drawer").addEventListener("keydown", trapDialogFocus);
 document.addEventListener("click", event => {
   const open = event.target.closest("[data-entity-open]");
   if (open) openEntityDrawer(open.dataset.entityOpen);
@@ -1852,3 +1895,9 @@ document.addEventListener("pointerup", () => {
 $("#zoom-in").addEventListener("click", () => { view.scale = Math.min(4, view.scale * 1.25); applyViewBox(); });
 $("#zoom-out").addEventListener("click", () => { view.scale = Math.max(0.4, view.scale / 1.25); applyViewBox(); });
 $("#zoom-reset").addEventListener("click", resetView);
+$$("[data-pan-x],[data-pan-y]").forEach(button => button.addEventListener("click", () => {
+  if (!view.base) return;
+  view.x += Number(button.dataset.panX || 0) * 100 / view.scale;
+  view.y += Number(button.dataset.panY || 0) * 100 / view.scale;
+  applyViewBox();
+}));
