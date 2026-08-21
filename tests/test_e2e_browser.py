@@ -679,6 +679,12 @@ def test_app_tile_keeps_opening_and_editing_as_separate_actions(page: Page) -> N
     assert card.locator("a.app-card-link").count() == 1
     assert card.locator("button.app-edit").count() == 1
     assert card.locator("a button").count() == 0
+    # De status hoort als zichtbaar woord op de tegel te staan, niet alleen als
+    # gekleurde stip (en niet alleen screenreader-only): een meekijker zonder
+    # netwerkkennis moet online/offline gewoon kunnen lezen.
+    state_text = card.locator(".app-state-text")
+    assert state_text.count() == 1
+    assert state_text.first.inner_text().strip() in {"online", "offline", "storing", "niet gemonitord"}
     card.locator("button.app-edit").click()
     expect(page.locator("#app-dialog")).to_be_visible()
     assert page.input_value("#app-form input[name=name]") == "Toegankelijke app"

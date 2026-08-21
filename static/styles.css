@@ -115,10 +115,10 @@ dialog{color:var(--ink)}dialog::backdrop{background:rgba(0,0,0,.65);backdrop-fil
 .app-card:hover{border-color:var(--line-bright);transform:translateY(-1px)}
 .app-card-link{display:flex;align-items:center;gap:12px;width:100%;min-width:0;padding:14px 48px 14px 15px;color:inherit;text-decoration:none}
 .app-icon{display:grid;place-items:center;flex:0 0 38px;width:38px;height:38px;border-radius:10px;background:rgba(var(--accent-rgb),.12);color:var(--accent-ink);font-size:17px}
-.app-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.app-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
 .app-body strong{font-family:var(--sans);font-size:13px;font-weight:600}
 .app-body small{color:var(--dim);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.app-state{margin-left:auto;display:flex;align-items:center}
+.app-state{flex:0 0 auto;margin-left:auto;display:flex;align-items:center;gap:6px}.app-state-text{font-size:10px;color:var(--dim);white-space:nowrap}
 .app-edit{position:absolute;top:8px;right:8px;width:32px;height:32px;opacity:0;transition:opacity .15s}
 .app-card:hover .app-edit,.app-edit:focus-visible{opacity:1}
 @media(max-width:640px){.app-cards{grid-template-columns:1fr}.app-edit{opacity:1}}

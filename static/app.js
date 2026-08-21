@@ -877,7 +877,7 @@ function renderApps() {
           <a class="app-card-link" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">
           <span class="app-icon">${esc(link.icon || link.name.slice(0, 2).toUpperCase())}</span>
           <span class="app-body"><strong>${esc(link.name)}</strong><small>${esc(link.description || hostOf(link.url))}</small></span>
-          <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}<span class="sr-only">status ${esc(statusLabel(link.status))}</span></span>
+          <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}<span class="app-state-text">${esc(statusLabel(link.status))}</span></span>
           </a>
           ${canWrite() ? `<button type="button" class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>` : ""}
         </article>`).join("")}</div>
