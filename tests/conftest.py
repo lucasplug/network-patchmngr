@@ -11,6 +11,9 @@ os.environ["PATCH_DATA_DIR"] = str(TEST_ROOT / "data")
 os.environ["PATCH_BACKUP_DIR"] = str(TEST_ROOT / "backups")
 # Geen OUI-bestand tenzij een test er zelf een zet.
 os.environ["PATCH_OUI_FILE"] = str(TEST_ROOT / "geen-oui.csv")
+# De bestaande functionele tests gebruiken vaste switch-/Deco-ID's. Productie
+# laat dit uit; alleen de testfixture vraagt expliciet om de demo-inventaris.
+os.environ["PATCH_SEED_SAMPLE_INVENTORY"] = "true"
 
 from fastapi.testclient import TestClient  # noqa: E402
 

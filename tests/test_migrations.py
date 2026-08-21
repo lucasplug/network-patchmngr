@@ -188,6 +188,22 @@ def test_a_fresh_database_is_stamped_without_running_migrations(tmp_path: Path) 
     assert read(path, "PRAGMA user_version") == [(SCHEMA_VERSION,)]
 
 
+def test_a_fresh_production_database_has_no_personal_sample_inventory(tmp_path: Path) -> None:
+    path = tmp_path / "leeg.db"
+    Database(path, seed_sample_inventory=False).initialize()
+    assert read(path, "SELECT id FROM physical_devices") == []
+    assert read(path, "SELECT id FROM ports") == []
+    assert read(path, "SELECT id FROM topology_nodes") == [("special:internet",)]
+    configs = dict(read(path, "SELECT id,config_json FROM providers"))
+    assert "192.168." not in " ".join(configs.values())
+
+
+def test_demo_inventory_is_only_added_when_explicitly_requested(tmp_path: Path) -> None:
+    path = tmp_path / "demo.db"
+    Database(path, seed_sample_inventory=True).initialize()
+    assert len(read(path, "SELECT id FROM physical_devices")) == 6
+
+
 def test_a_newer_database_is_refused_instead_of_damaged(tmp_path: Path) -> None:
     """Terugrollen naar een oudere image mag geen halve migratie opleveren."""
     path = tmp_path / "toekomst.db"

@@ -21,7 +21,12 @@ class SpeedtestManager:
         self.lock = asyncio.Lock()
 
     def payload(self) -> dict[str, Any]:
-        settings = self.database.fetch_one("SELECT * FROM speedtest_settings WHERE id=1") or {}
+        settings = self.database.fetch_one(
+            """SELECT s.*,e.name AS monitor_entity_name,e.status AS monitor_status,
+                      e.status_updated_at AS monitor_status_updated_at
+               FROM speedtest_settings s
+               LEFT JOIN entities e ON e.id=s.monitor_entity_id WHERE s.id=1"""
+        ) or {}
         if settings:
             settings["enabled"] = bool(settings["enabled"])
             settings["telemetry_enabled"] = bool(settings["telemetry_enabled"])
@@ -35,7 +40,28 @@ class SpeedtestManager:
             """SELECT id,download_mbps,upload_mbps,ping_ms,jitter_ms,server_name,started_at,completed_at
                FROM speedtest_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 120"""
         )
-        return {"settings": settings, "latest": latest, "running": running, "history": history}
+        return {
+            "settings": settings,
+            "internet": self.internet_payload(settings),
+            "latest": latest,
+            "running": running,
+            "history": history,
+        }
+
+    def internet_payload(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        settings = settings or self.database.fetch_one(
+            """SELECT s.monitor_entity_id,e.name AS monitor_entity_name,e.status AS monitor_status,
+                      e.status_updated_at AS monitor_status_updated_at
+               FROM speedtest_settings s
+               LEFT JOIN entities e ON e.id=s.monitor_entity_id WHERE s.id=1"""
+        ) or {}
+        return {
+            "configured": bool(settings.get("monitor_entity_id")),
+            "entity_id": settings.get("monitor_entity_id"),
+            "entity_name": settings.get("monitor_entity_name"),
+            "status": settings.get("monitor_status") or "unknown",
+            "updated_at": settings.get("monitor_status_updated_at"),
+        }
 
     def recover_stale_runs(self) -> None:
         """A running subprocess cannot survive an application/container restart."""

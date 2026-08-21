@@ -35,6 +35,7 @@ def test_initializes_expected_physical_inventory() -> None:
         assert len(payload["providers"]) == 7
         assert {node["id"] for node in payload["topology"]["nodes"]} >= {"special:internet", "physical:ont-01"}
         assert payload["speedtest"]["settings"]["telemetry_enabled"] is False
+        assert payload["speedtest"]["settings"]["enabled"] is False
         assert csrf
 
 
