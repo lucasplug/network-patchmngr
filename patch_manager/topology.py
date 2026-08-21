@@ -222,7 +222,14 @@ def topology_payload(database: Database) -> dict[str, Any]:
            ORDER BY n.created_at"""
     )
     metrics = entity_metrics(database)
+    internet = database.fetch_one(
+        """SELECT s.monitor_entity_id,e.status,e.ip_address,e.hostname,e.last_seen_at
+           FROM speedtest_settings s LEFT JOIN entities e ON e.id=s.monitor_entity_id WHERE s.id=1"""
+    ) or {}
     for node in nodes:
+        if node["reference_type"] == "special" and node["reference_id"] == "internet":
+            node["status"] = internet.get("status") or "unknown"
+            node["last_seen_at"] = internet.get("last_seen_at")
         node["manual_position"] = bool(node["manual_position"])
         node["collapsed"] = bool(node["collapsed"])
         node["metadata"] = json.loads(node.pop("metadata_json") or "{}")

@@ -28,6 +28,7 @@ De kernregel is technisch afgedwongen: providers kunnen status, IP-adressen, hos
 - **Uitwisseling & herstel** — SQLite-back-ups downloaden, importeren en terugzetten, plus configuratie exporteren/importeren als JSON. Voor restore/import wordt automatisch een veiligheidsback-up gemaakt.
 - **Audit & undo** — de laatste 200 beheeracties zijn zichtbaar; topologiewijzigingen hebben een server-side undo-geschiedenis van maximaal 50 stappen.
 - Eerste-run beheerder, scrypt-wachtwoordhashing, server-side sessies, HttpOnly-cookie en CSRF-controle.
+- Aparte rollen: beheerders mogen wijzigen; kijkers krijgen alleen de inventaris, apps, statussen en topologie te zien. Beheergegevens en mutaties blijven server-side geblokkeerd. Accounts beheer je onder **Admin → Toegang**.
 - SQLite in WAL-modus met auditlog en consistente online-back-ups.
 - Read-only adapters voor DHCP/ARP, Uptime Kuma, Glances, Portainer, Proxmox VE, AdGuard Home en Nginx Proxy Manager, elk met een testverbinding die vóór opslaan laat zien wat hij zou vinden.
 - Vendorherkenning van gevonden apparaten via een lokaal IEEE OUI-bestand in de image — geen enkele externe lookup.
@@ -93,7 +94,7 @@ PATCH_SESSION_SECURE=true
 
 ## Providers configureren
 
-Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de URL's en inloggegevens in en zet de provider daarna aan. Inloggegevens worden met een automatisch gemaakte sleutel versleuteld opgeslagen; de interface geeft alleen aan welke velden zijn ingesteld.
+Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de URL's en inloggegevens in en zet de provider daarna aan. Een ingeschakelde provider wordt pas opgeslagen nadat een read-only verbindingstest slaagt. Inloggegevens worden met een automatisch gemaakte sleutel versleuteld opgeslagen; de interface geeft alleen aan welke velden zijn ingesteld.
 
 | Provider | Inloggegevens in Admin | Opmerking |
 |---|---|---|
@@ -105,7 +106,7 @@ Providers staan bij de eerste start uit. Vul in **Admin → Configureren** de UR
 | AdGuard Home | gebruikersnaam en wachtwoord | Importeert clients en DNS-rewrites via `/control/clients` en `/control/rewrite/list` |
 | Nginx Proxy Manager | API-token of gebruikersnaam en wachtwoord | Importeert proxyhosts; de adapter schrijft niets terug naar NPM |
 
-De meegeleverde configuratie bevat alvast de adressen uit het ontwerp voor Docker VM (`192.168.1.12`) en Proxmox (`192.168.1.100`). Controleer die voordat je providers inschakelt.
+Een verse installatie begint zonder voorbeeldapparatuur en zonder vooraf ingevulde privé-adressen. Voeg je eigen netwerkapparaten toe of gebruik de setup-wizard. Alleen voor een tijdelijke demo kun je `PATCH_SEED_SAMPLE_INVENTORY=true` instellen; daarmee verschijnen de voorbeeldswitches, Deco's en ONT.
 
 Proxmox stelt zijn tokenkop samen uit drie delen: `PVEAPIToken=<gebruiker>!<token-ID>=<geheim>`. In Proxmox staat dat onder *Datacenter → Permissions → API Tokens* als bijvoorbeeld `root@pam!patchmanager`. De wizard vraagt de eerste twee los uit; alleen het geheim wordt versleuteld opgeslagen.
 
@@ -116,7 +117,7 @@ AdGuard- en NPM-data zijn geïmporteerde observaties: wijzigingen doe je in de b
 ## Topologie en relaties
 
 - Een fysieke poortkoppeling tekent automatisch een fysieke relatie. Dat geldt ook voor een kabel tussen twee netwerkapparaten — de glasvezel-ONT naar een Deco, of switch naar switch. Een patchpaneel ertussen wordt doorlopen, niet als extra knoop getekend.
-- De **glasvezel-ONT** staat als netwerkapparaat met één LAN-poort in de inventaris; het internet komt daar binnen. Waar die poort heen gaat trek je zelf in de patchview, via **Doorverbinding** in de poortlade.
+- Voeg een **glasvezel-ONT** desgewenst als netwerkapparaat met één LAN-poort toe; het internet komt daar binnen. Waar die poort heen gaat trek je zelf in de patchview, via **Doorverbinding** in de poortlade. De optionele demo-inventaris bevat er al één.
 - Een netwerkapparaat heeft geen eigen status: een switch draait geen agent. Koppel onder **Statusmonitor** de observatie die erover gaat — een Uptime Kuma-ping op het beheer-IP, of de ping-discovery van dat adres — en het apparaat krijgt diens status. Die observatie verdwijnt dan als losse knoop, want anders staat hetzelfde ding er twee keer.
 - Een device kan ook zónder poort aan een netwerkapparaat hangen: wifi-clients op een Deco, of een switchpoort die je nog niet weet. Die verbinding is onderbroken getekend.
 - Proxmox, Portainer en Nginx Proxy Manager leveren automatisch parent/child-relaties wanneer de bron die informatie kent.
@@ -202,7 +203,7 @@ regressies in licht/donker, dialogen, 320px-reflow en tekstafstand.
 
 Containers en VM's worden niet samengevoegd met hun host. Ze blijven aparte entities met een `parent_id`, zodat de topologie een zuivere virtuele laag kan tekenen.
 
-Geïmporteerde entities worden niet lokaal verwijderd: verwijder of deactiveer ze in hun provider. Handmatig aangemaakte entities zijn verwijderbaar vanuit **Patch → Handmatige devices**. Ook de vooraf ingestelde switches en Deco-units zijn blijvend verwijderbaar en worden na een herstart niet opnieuw aangemaakt.
+Geïmporteerde entities worden niet lokaal verwijderd: verwijder of deactiveer ze in hun provider. Handmatig aangemaakte entities en netwerkapparaten zijn verwijderbaar vanuit de patchview én via **Topologie → Bewerken → Apparaat beheren**. De dialoog toont eerst welke kabels, poorten en relaties hierdoor verdwijnen. Eventuele demo-apparatuur is blijvend verwijderbaar en keert na een herstart niet terug.
 
 ## Bekende hardwarebeperking
 

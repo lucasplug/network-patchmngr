@@ -45,7 +45,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-database = Database(settings.database_path)
+database = Database(settings.database_path, seed_sample_inventory=settings.seed_sample_inventory)
 SECRET_KEY_PATH = settings.data_dir / "provider-secrets.key"
 provider_secrets = SecretStore(database, SECRET_KEY_PATH)
 providers = ProviderManager(database, provider_secrets, settings.trusted_subnets)
@@ -69,6 +69,7 @@ class AuthContext:
     username: str
     csrf_token: str
     session_token: str
+    role: str
 
 
 class Credentials(BaseModel):
@@ -79,6 +80,10 @@ class Credentials(BaseModel):
     @classmethod
     def strip_username(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
+
+
+class UserCreateInput(Credentials):
+    role: str = Field(default="viewer", pattern="^(admin|viewer)$")
 
 
 class TrimmedInput(BaseModel):
@@ -232,6 +237,7 @@ class SpeedtestSettingsInput(TrimmedInput):
     server_id: str | None = Field(default=None, max_length=80)
     interface_name: str | None = Field(default=None, max_length=80)
     duration_seconds: int = Field(default=10, ge=5, le=30)
+    monitor_entity_id: str | None = Field(default=None, max_length=64)
 
 
 class DnsRecordInput(TrimmedInput):
@@ -298,11 +304,11 @@ PROVIDER_CREDENTIAL_FIELDS: dict[str, list[dict[str, str]]] = {
 # URL staan hier niet in.
 PROVIDER_CONFIG_FIELDS: dict[str, list[dict[str, str]]] = {
     "proxmox": [
-        {"key": "user", "label": "Gebruiker (user@realm)", "placeholder": "root@pam"},
-        {"key": "token_name", "label": "Token-ID (deel na de !)", "placeholder": "patchmanager"},
+        {"key": "user", "label": "Proxmox-gebruiker, inclusief @realm", "placeholder": "readonly@pve"},
+        {"key": "token_name", "label": "Naam van het API-token (na !)", "placeholder": "patchmanager"},
     ],
     "uptime_kuma": [
-        {"key": "status_page_slug", "label": "Statuspagina-slug", "placeholder": "homelab"},
+        {"key": "status_page_slug", "label": "Naam in de statuspagina-URL", "placeholder": "homelab"},
     ],
 }
 
@@ -339,19 +345,38 @@ def current_auth(plugnet_session: str | None = Cookie(default=None)) -> AuthCont
     if not plugnet_session:
         raise HTTPException(401, "Log eerst in")
     row = database.fetch_one(
-        """SELECT s.user_id,s.csrf_token,s.expires_at,u.username
+        """SELECT s.user_id,s.csrf_token,s.expires_at,u.username,u.role
            FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?""",
         (token_digest(plugnet_session),),
     )
     if not row or row["expires_at"] < utcnow():
         raise HTTPException(401, "Sessie is verlopen")
-    return AuthContext(row["user_id"], row["username"], row["csrf_token"], plugnet_session)
+    return AuthContext(row["user_id"], row["username"], row["csrf_token"], plugnet_session, row["role"])
 
 
 def write_auth(
     auth: AuthContext = Depends(current_auth),
     x_csrf_token: str | None = Header(default=None),
 ) -> AuthContext:
+    if not x_csrf_token or not hmac.compare_digest(x_csrf_token, auth.csrf_token):
+        raise HTTPException(403, "Ongeldig CSRF-token")
+    if auth.role != "admin":
+        raise HTTPException(403, "Alleen beheerders kunnen wijzigingen opslaan")
+    return auth
+
+
+def admin_auth(auth: AuthContext = Depends(current_auth)) -> AuthContext:
+    """Beheergegevens via GET hebben geen CSRF nodig, maar wel de adminrol."""
+    if auth.role != "admin":
+        raise HTTPException(403, "Alleen beheerders hebben toegang tot deze gegevens")
+    return auth
+
+
+def csrf_auth(
+    auth: AuthContext = Depends(current_auth),
+    x_csrf_token: str | None = Header(default=None),
+) -> AuthContext:
+    """Sessiemutaties, zoals uitloggen, zijn ook voor kijkers toegestaan."""
     if not x_csrf_token or not hmac.compare_digest(x_csrf_token, auth.csrf_token):
         raise HTTPException(403, "Ongeldig CSRF-token")
     return auth
@@ -457,7 +482,12 @@ def auth_status(plugnet_session: str | None = Cookie(default=None)) -> dict[str,
     if plugnet_session:
         try:
             auth = current_auth(plugnet_session)
-            result.update(authenticated=True, username=auth.username, csrf_token=auth.csrf_token)
+            result.update(
+                authenticated=True,
+                username=auth.username,
+                role=auth.role,
+                csrf_token=auth.csrf_token,
+            )
         except HTTPException:
             pass
     return result
@@ -476,7 +506,7 @@ def setup(payload: Credentials, response: Response) -> dict[str, Any]:
             if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
                 raise HTTPException(409, "De eerste beheerder bestaat al")
             connection.execute(
-                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                "INSERT INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,'admin',?)",
                 (user_id, payload.username.strip(), password_hash, utcnow()),
             )
     except sqlite3.IntegrityError as exc:
@@ -484,7 +514,7 @@ def setup(payload: Credentials, response: Response) -> dict[str, Any]:
     token, csrf = create_session(user_id)
     set_session_cookie(response, token)
     database.audit(user_id, "auth.setup", "user", user_id)
-    return {"username": payload.username.strip(), "csrf_token": csrf}
+    return {"username": payload.username.strip(), "role": "admin", "csrf_token": csrf}
 
 
 @app.post("/api/auth/login")
@@ -504,14 +534,57 @@ def login(payload: Credentials, request: Request, response: Response) -> dict[st
     token, csrf = create_session(user["id"])
     set_session_cookie(response, token)
     database.audit(user["id"], "auth.login", "user", user["id"])
-    return {"username": user["username"], "csrf_token": csrf}
+    return {"username": user["username"], "role": user["role"], "csrf_token": csrf}
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+def logout(response: Response, auth: AuthContext = Depends(csrf_auth)) -> dict[str, bool]:
     with database.transaction() as connection:
         connection.execute("DELETE FROM sessions WHERE token_hash=?", (token_digest(auth.session_token),))
     response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+def users_payload() -> list[dict[str, Any]]:
+    return database.fetch_all(
+        "SELECT id,username,role,created_at FROM users ORDER BY role,username COLLATE NOCASE"
+    )
+
+
+@app.post("/api/users")
+def create_user(payload: UserCreateInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    user_id = str(uuid.uuid4())
+    try:
+        password_hash = hash_password(payload.password)
+        with database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO users(id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)",
+                (user_id, payload.username, password_hash, payload.role, utcnow()),
+            )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Deze gebruikersnaam bestaat al") from exc
+    database.audit(auth.user_id, "user.create", "user", user_id, {"role": payload.role})
+    return next(item for item in users_payload() if item["id"] == user_id)
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: str, confirm: str, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    user = database.fetch_one("SELECT id,username,role FROM users WHERE id=?", (user_id,))
+    if not user:
+        raise HTTPException(404, "Gebruiker niet gevonden")
+    if user_id == auth.user_id:
+        raise HTTPException(409, "Je kunt je eigen actieve account niet verwijderen")
+    if confirm != user["username"]:
+        raise HTTPException(422, "De bevestigingsnaam komt niet overeen")
+    if user["role"] == "admin":
+        admins = database.fetch_one("SELECT COUNT(*) AS n FROM users WHERE role='admin'")["n"]
+        if admins <= 1:
+            raise HTTPException(409, "De laatste beheerder kan niet worden verwijderd")
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM users WHERE id=?", (user_id,))
+    database.audit(auth.user_id, "user.delete", "user", user_id, {"username": user["username"]})
     return {"ok": True}
 
 
@@ -623,17 +696,27 @@ def inventory_counts() -> dict[str, Any]:
 
 
 @app.get("/api/bootstrap")
-def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+def bootstrap(auth: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     entities = database.fetch_all("SELECT * FROM entities ORDER BY origin,name")
-    provider_rows = [serialize_provider(row) for row in database.fetch_all("SELECT * FROM providers ORDER BY name")]
-    conflicts = database.fetch_all(
-        """SELECT c.*,e.name AS entity_name,p.name AS provider_name FROM conflicts c
-           LEFT JOIN entities e ON e.id=c.entity_id LEFT JOIN providers p ON p.id=c.provider_id
-           ORDER BY c.status,c.created_at DESC"""
+    is_admin = auth.role == "admin"
+    provider_rows = (
+        [serialize_provider(row) for row in database.fetch_all("SELECT * FROM providers ORDER BY name")]
+        if is_admin else []
+    )
+    conflicts = (
+        database.fetch_all(
+            """SELECT c.*,e.name AS entity_name,p.name AS provider_name FROM conflicts c
+               LEFT JOIN entities e ON e.id=c.entity_id LEFT JOIN providers p ON p.id=c.provider_id
+               ORDER BY c.status,c.created_at DESC"""
+        )
+        if is_admin else []
     )
     counts = inventory_counts()
+    if not is_admin:
+        counts["conflicts"] = 0
     return {
         "site": {"title": app_title(), "timezone": "Europe/Amsterdam"},
+        "auth": {"username": auth.username, "role": auth.role, "can_write": is_admin},
         "categories": categories.payload(),
         "app_links": serialize_app_links(),
         "counts": counts,
@@ -641,39 +724,43 @@ def bootstrap(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
         "entities": entities,
         "providers": provider_rows,
         "conflicts": conflicts,
-        "backups": list_backups(),
+        "backups": list_backups() if is_admin else [],
         "topology": topology_payload(database),
         "dns_records": database.fetch_all(
             """SELECT d.*,e.name AS entity_name,p.name AS provider_name FROM dns_records d
                LEFT JOIN entities e ON e.id=d.entity_id LEFT JOIN providers p ON p.id=d.provider_id
                ORDER BY d.name,d.value"""
-        ),
+        ) if is_admin else [],
         "proxy_hosts": [
             {**row, "domains": json.loads(row["domains_json"] or "[]")}
             for row in database.fetch_all(
                 """SELECT ph.*,e.name AS entity_name FROM proxy_hosts ph
                    LEFT JOIN entities e ON e.id=ph.entity_id ORDER BY ph.updated_at DESC"""
             )
-        ],
+        ] if is_admin else [],
         "speedtest": speedtests.payload(),
         "provider_records": database.fetch_all(
             """SELECT pr.id,pr.provider_id,pr.external_id,pr.entity_id,pr.kind,pr.last_seen_at,
                       p.name AS provider_name,e.name AS entity_name
                FROM provider_records pr JOIN providers p ON p.id=pr.provider_id
                LEFT JOIN entities e ON e.id=pr.entity_id ORDER BY p.name,pr.kind,pr.external_id"""
-        ),
+        ) if is_admin else [],
         "audit_log": database.fetch_all(
             """SELECT a.*,u.username FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id
                ORDER BY a.created_at DESC LIMIT 200"""
-        ),
+        ) if is_admin else [],
+        "users": users_payload() if is_admin else [],
     }
 
 
 @app.get("/api/summary")
-def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+def summary(auth: AuthContext = Depends(current_auth)) -> dict[str, Any]:
     """Licht poll-endpoint: statussen en tellers, geen volledige inventaris."""
+    counts = inventory_counts()
+    if auth.role != "admin":
+        counts["conflicts"] = 0
     return {
-        "counts": inventory_counts(),
+        "counts": counts,
         # De appstatus komt van dezelfde entities, maar het dashboard wil de
         # tegels los kunnen bijwerken zonder een volledige bootstrap.
         "app_links": serialize_app_links(),
@@ -683,13 +770,17 @@ def summary(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
         "metrics": entity_metrics(database),
         "providers": database.fetch_all(
             "SELECT id,enabled,last_run_at,last_success_at,last_error FROM providers"
-        ),
+        ) if auth.role == "admin" else [],
         "speedtest": {
             "latest": database.fetch_one(
                 "SELECT * FROM speedtest_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1"
             ),
             "running": database.fetch_one(
                 "SELECT id,started_at FROM speedtest_runs WHERE status='running' ORDER BY started_at DESC LIMIT 1"
+            ),
+            "internet": speedtests.internet_payload(),
+            "settings": database.fetch_one(
+                "SELECT last_error FROM speedtest_settings WHERE id=1"
             ),
         },
     }
@@ -755,7 +846,7 @@ def local_subnet_suggestion() -> str | None:
 
 
 @app.get("/api/wizard/info")
-def wizard_info(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+def wizard_info(_: AuthContext = Depends(admin_auth)) -> dict[str, Any]:
     row = database.fetch_one("SELECT value FROM app_meta WHERE key='wizard_dismissed'")
     return {
         "dismissed": bool(row and row["value"] == "1"),
@@ -900,7 +991,7 @@ def search(q: str, _: AuthContext = Depends(current_auth)) -> list[dict[str, Any
 
 
 @app.get("/api/changes")
-def changes(days: int = 7, _: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+def changes(days: int = 7, _: AuthContext = Depends(admin_auth)) -> dict[str, Any]:
     """Wat is er sinds kort verschenen of verdwenen.
 
     De auditlog vertelt wat jíj hebt gedaan; dit vertelt wat het netwerk deed.
@@ -927,7 +1018,7 @@ def changes(days: int = 7, _: AuthContext = Depends(current_auth)) -> dict[str, 
 
 
 @app.get("/api/discoveries")
-def discoveries(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
+def discoveries(_: AuthContext = Depends(admin_auth)) -> list[dict[str, Any]]:
     """Open discoveries voor het bulk-toewijsscherm (ook los van de wizard)."""
     linked = {
         row["b_entity_id"]
@@ -1551,7 +1642,7 @@ def delete_provider(provider_id: str, confirm: str, auth: AuthContext = Depends(
 
 
 @app.patch("/api/providers/{provider_id}")
-def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+async def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
     provider = database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
     if not provider:
         raise HTTPException(404, "Provider niet gevonden")
@@ -1559,6 +1650,24 @@ def update_provider(provider_id: str, payload: ProviderInput, auth: AuthContext 
     supplied = set(payload.credentials) | set(payload.clear_credentials)
     if not supplied.issubset(allowed):
         raise HTTPException(422, "Onbekend credentialveld voor deze provider")
+    # Een bron mag pas actief worden nadat precies de configuratie die we gaan
+    # bewaren een read-only proefcall heeft doorstaan. Zo kan een ontbrekende
+    # API-key nooit kortstondig als 'gereed' verschijnen.
+    if payload.enabled:
+        effective_credentials = dict(provider_secrets.get(provider_id))
+        for key in payload.clear_credentials:
+            effective_credentials.pop(key, None)
+        effective_credentials.update(
+            {key: value.strip() for key, value in payload.credentials.items() if value and value.strip()}
+        )
+        result = await providers.test_one(
+            provider_id,
+            payload.config,
+            effective_credentials,
+            merge_stored=False,
+        )
+        if not result.get("ok"):
+            raise HTTPException(422, f"Verbindingstest mislukt: {result.get('summary') or 'onbekende fout'}")
     with database.transaction() as connection:
         connection.execute(
             """UPDATE providers SET name=?,enabled=?,poll_interval_seconds=?,config_json=?,updated_at=? WHERE id=?""",
@@ -1642,7 +1751,7 @@ def list_backups() -> list[dict[str, Any]]:
 
 
 @app.get("/api/backups")
-def backups_list(_: AuthContext = Depends(current_auth)) -> list[dict[str, Any]]:
+def backups_list(_: AuthContext = Depends(admin_auth)) -> list[dict[str, Any]]:
     return list_backups()
 
 
@@ -1664,7 +1773,7 @@ def backup_path(name: str) -> Path:
 
 
 @app.get("/api/backups/{name}/download")
-def backup_download(name: str, _: AuthContext = Depends(current_auth)) -> FileResponse:
+def backup_download(name: str, _: AuthContext = Depends(admin_auth)) -> FileResponse:
     path = backup_path(name)
     media_type = "application/zip" if path.suffix == ".pmbackup" else "application/vnd.sqlite3"
     return FileResponse(path, filename=path.name, media_type=media_type)
@@ -1722,7 +1831,7 @@ CONFIG_TABLES = (
 
 
 @app.get("/api/config/export")
-def config_export(_: AuthContext = Depends(current_auth)) -> dict[str, Any]:
+def config_export(_: AuthContext = Depends(admin_auth)) -> dict[str, Any]:
     tables: dict[str, list[dict[str, Any]]] = {}
     for table in CONFIG_TABLES:
         where = " WHERE source='manual'" if table == "dns_records" else ""
@@ -2006,12 +2115,17 @@ async def speedtest_run(_: AuthContext = Depends(write_auth)) -> dict[str, Any]:
 
 @app.patch("/api/speedtest/settings")
 def speedtest_settings_update(payload: SpeedtestSettingsInput, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    monitor_entity_id = (payload.monitor_entity_id or "").strip() or None
+    if monitor_entity_id and not database.fetch_one(
+        "SELECT id FROM entities WHERE id=?", (monitor_entity_id,)
+    ):
+        raise HTTPException(404, "Internetmonitor niet gevonden")
     with database.transaction() as connection:
         connection.execute(
             """UPDATE speedtest_settings SET enabled=?,interval_seconds=?,server_id=?,interface_name=?,
-               duration_seconds=?,telemetry_enabled=0,updated_at=? WHERE id=1""",
+               duration_seconds=?,telemetry_enabled=0,monitor_entity_id=?,updated_at=? WHERE id=1""",
             (int(payload.enabled), payload.interval_seconds, payload.server_id or None,
-             payload.interface_name or None, payload.duration_seconds, utcnow()),
+             payload.interface_name or None, payload.duration_seconds, monitor_entity_id, utcnow()),
         )
     database.audit(auth.user_id, "speedtest.settings.update", "speedtest", "1", payload.model_dump())
     return {"ok": True}

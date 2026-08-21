@@ -709,12 +709,17 @@ class ProviderManager:
     # kloppen en wat er gevonden zou worden. Slaat niets op.
 
     async def test_one(
-        self, provider_id: str, config: dict[str, Any], credentials: dict[str, str | None]
+        self,
+        provider_id: str,
+        config: dict[str, Any],
+        credentials: dict[str, str | None],
+        *,
+        merge_stored: bool = True,
     ) -> dict[str, Any]:
         provider = self.database.fetch_one("SELECT * FROM providers WHERE id=?", (provider_id,))
         if not provider:
             raise ValueError("Onbekende provider")
-        merged = dict(self.secrets.get(provider_id))
+        merged = dict(self.secrets.get(provider_id)) if merge_stored else {}
         merged.update({key: value.strip() for key, value in credentials.items() if value and value.strip()})
         handler = getattr(self, f"_test_{provider['type']}", None)
         if handler is None:

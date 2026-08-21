@@ -41,13 +41,13 @@ def test_the_two_environments_keep_separate_settings_and_secrets() -> None:
         ).json()
         client.patch(
             f"/api/providers/{second['id']}", headers=headers,
-            json={"enabled": True, "poll_interval_seconds": 300,
+            json={"enabled": False, "poll_interval_seconds": 300,
                   "config": {"base_url": "http://192.168.1.20:3000"},
                   "credentials": {"username": "zolder", "password": "geheim-zolder"}},
         )
         client.patch(
             "/api/providers/adguard", headers=headers,
-            json={"enabled": True, "poll_interval_seconds": 300,
+            json={"enabled": False, "poll_interval_seconds": 300,
                   "config": {"base_url": "http://192.168.1.12:3000"},
                   "credentials": {"username": "meterkast", "password": "geheim-meterkast"}},
         )

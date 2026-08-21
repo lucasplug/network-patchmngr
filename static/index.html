@@ -44,17 +44,17 @@
         <div class="top-subtitle">HomeLab · fysieke waarheid & live observaties</div>
       </div>
       <div class="top-actions">
-        <button type="button" class="speed-indicator" id="speed-indicator" title="Internetsnelheid en historie">
+        <button type="button" class="speed-indicator" id="speed-indicator" title="Internetstatus en speedtesthistorie">
           <span class="speed-value">↓ <b id="speed-down">—</b></span>
           <span class="speed-value">↑ <b id="speed-up">—</b></span>
           <span class="speed-ping" id="speed-ping">— ms</span>
-          <span class="speed-age" id="speed-age">nog niet gemeten</span>
+          <span class="speed-age"><b id="internet-status">internet niet gemonitord</b><span class="speed-separator"> · </span><span id="speed-age">nog niet gemeten</span></span>
         </button>
         <div class="search-box"><input id="search-input" type="search" placeholder="Zoeken…" autocomplete="off" aria-label="Zoek in de inventaris"><div id="search-results" class="search-results hidden"></div></div>
         <span class="system-state"><i class="status-dot up"></i><span id="last-refresh">verbonden</span></span>
         <button type="button" class="icon-button" id="theme-toggle" title="Licht of donker" aria-label="Wissel tussen licht en donker">◐</button>
         <button type="button" class="icon-button" id="refresh-button" title="Verversen" aria-label="Ververs gegevens">↻</button>
-        <button type="button" class="profile-button" id="logout-button" title="Uitloggen" aria-label="Uitloggen"><span class="avatar" id="avatar">A</span><span id="username">admin</span><span class="logout-icon" aria-hidden="true">↪</span></button>
+        <button type="button" class="profile-button" id="logout-button" title="Uitloggen" aria-label="Uitloggen"><span class="avatar" id="avatar">A</span><span class="profile-copy"><span id="username">admin</span><small id="role-label"></small></span><span class="logout-icon" aria-hidden="true">↪</span></button>
       </div>
     </header>
 
@@ -62,14 +62,14 @@
       <button type="button" class="tab active" data-tab="patch" aria-controls="patch-view" aria-current="page"><span class="tab-icon">⌁</span>Patch</button>
       <button type="button" class="tab" data-tab="apps" aria-controls="apps-view"><span class="tab-icon">▦</span>Apps</button>
       <button type="button" class="tab" data-tab="topology" aria-controls="topology-view"><span class="tab-icon">◇</span>Topologie</button>
-      <button type="button" class="tab" data-tab="admin" aria-controls="admin-view"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
+      <button type="button" class="tab" id="admin-tab" data-tab="admin" aria-controls="admin-view"><span class="tab-icon">⚙</span>Admin <b id="admin-badge" class="badge hidden">0</b></button>
     </nav>
 
     <main id="main-content" tabindex="-1">
     <section id="patch-view" class="view active">
       <div class="view-heading">
         <div><p class="eyebrow">Handmatig · bron van waarheid</p><h1>Fysieke aansluitingen</h1><p class="muted">Automatische bronnen tonen status, maar wijzigen nooit jouw poortkeuzes.</p></div>
-        <div class="heading-actions"><button type="button" class="button" id="print-patch">Printen</button><button type="button" class="button" id="import-csv-button">CSV importeren</button><input class="hidden" id="import-csv-file" type="file" accept=".csv,text/csv"><button type="button" class="button" id="new-entity-button">+ Device</button><button type="button" class="button primary" id="new-physical-button">+ Netwerkapparaat</button></div>
+        <div class="heading-actions"><button type="button" class="button" id="print-patch">Printen</button><button type="button" class="button write-only" id="import-csv-button">CSV importeren</button><input class="hidden" id="import-csv-file" type="file" accept=".csv,text/csv"><button type="button" class="button write-only" id="new-entity-button">+ Device</button><button type="button" class="button primary write-only" id="new-physical-button">+ Netwerkapparaat</button></div>
       </div>
       <div id="summary-chips" class="chips"></div>
       <div class="patch-layout">
@@ -77,7 +77,7 @@
           <div class="section-bar"><span>Netwerkapparaten</span><span class="muted" id="device-count"></span></div>
           <div id="physical-grid" class="physical-grid"></div>
         </div>
-        <aside class="unpatched-panel glass" id="unpatched-drop" aria-labelledby="unpatched-title">
+        <aside class="unpatched-panel glass write-only" id="unpatched-drop" aria-labelledby="unpatched-title">
           <div class="side-title" id="unpatched-title">Nog te koppelen <span class="muted" id="unpatched-count"></span></div>
           <p class="muted tiny">Sleep een device op een poort. Sleep een kabel hierheen om los te koppelen, of klik een device om een poort te kiezen.</p>
           <p id="pending-link" class="pending-link hidden"></p>
@@ -91,7 +91,7 @@
     <section id="apps-view" class="view" aria-hidden="true">
       <div class="view-heading">
         <div><p class="eyebrow">Snelkoppelingen</p><h1>Apps</h1><p class="muted">Links naar je eigen diensten, met de status uit Uptime Kuma ernaast.</p></div>
-        <div class="heading-actions"><button type="button" class="button primary" id="new-app-button">+ App</button></div>
+        <div class="heading-actions write-only"><button type="button" class="button primary" id="new-app-button">+ App</button></div>
       </div>
       <div id="apps-grid" class="apps-grid"></div>
     </section>
@@ -104,17 +104,17 @@
           <label><input type="checkbox" data-layer="virtual" checked> virtueel</label>
           <label><input type="checkbox" data-layer="services" checked> services</label>
           <label><input type="checkbox" data-layer="hidden"> verborgen <b id="hidden-count" class="badge hidden">0</b></label>
-        </div><button type="button" class="button" id="topology-edit">Bewerken</button></div>
+        </div><button type="button" class="button write-only" id="topology-edit">Bewerken</button></div>
       </div>
       <div id="topology-editbar" class="editbar hidden"><span><i class="status-dot degraded"></i><span id="selection-status">Bewerkmodus · shift-klik voor multiselectie</span></span><div><button type="button" class="button hidden" id="group-selection">Selectie groeperen</button><button type="button" class="button" id="topology-undo">↶ Ongedaan</button><button type="button" class="button" id="add-group">+ Groep</button><button type="button" class="button" id="add-relation">+ Relatie</button><button type="button" class="button" id="reset-layout">Auto-indeling</button><button type="button" class="button primary" id="finish-edit">Klaar</button></div></div>
       <div class="topology-card glass">
-        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>up</span><span><i class="status-dot degraded"></i>degraded</span><span><i class="status-dot down"></i>down</span><span><i class="status-dot unknown"></i>onbekend</span></div><div class="topology-controls"><div class="pan-controls" role="group" aria-label="Topologie verschuiven"><button type="button" class="icon-button" data-pan-x="-1" aria-label="Kaart naar links">←</button><button type="button" class="icon-button" data-pan-y="-1" aria-label="Kaart omhoog">↑</button><button type="button" class="icon-button" data-pan-y="1" aria-label="Kaart omlaag">↓</button><button type="button" class="icon-button" data-pan-x="1" aria-label="Kaart naar rechts">→</button></div><div class="zoom-controls"><button type="button" class="icon-button" id="zoom-out" aria-label="Uitzoomen">−</button><span id="zoom-level" class="muted">100%</span><button type="button" class="icon-button" id="zoom-in" aria-label="Inzoomen">+</button><button type="button" class="button micro" id="zoom-reset">Passend</button></div></div></div>
+        <div class="topology-toolbar"><div class="legend"><span><i class="status-dot up"></i>online</span><span><i class="status-dot degraded"></i>storing</span><span><i class="status-dot down"></i>offline</span><span><i class="status-dot unknown"></i>niet gemonitord</span></div><div class="topology-controls"><div class="pan-controls" role="group" aria-label="Topologie verschuiven"><button type="button" class="icon-button" data-pan-x="-1" aria-label="Kaart naar links">←</button><button type="button" class="icon-button" data-pan-y="-1" aria-label="Kaart omhoog">↑</button><button type="button" class="icon-button" data-pan-y="1" aria-label="Kaart omlaag">↓</button><button type="button" class="icon-button" data-pan-x="1" aria-label="Kaart naar rechts">→</button></div><div class="zoom-controls"><button type="button" class="icon-button" id="zoom-out" aria-label="Uitzoomen">−</button><span id="zoom-level" class="muted">100%</span><button type="button" class="icon-button" id="zoom-in" aria-label="Inzoomen">+</button><button type="button" class="button micro" id="zoom-reset">Passend</button></div></div></div>
         <p class="topology-mobile-hint muted tiny">Sleep in de kaart of gebruik de pijlknoppen om andere delen te bekijken. Kies <strong>Passend</strong> om het hele netwerk in beeld te brengen.</p>
         <div class="topology-scroll"><svg id="topology-canvas" viewBox="0 0 1200 760" role="img" aria-label="Netwerktopologie"></svg></div>
         <details class="data-alternative"><summary>Topologie als tekst</summary><div id="topology-text-summary"></div></details>
       </div>
       <div class="speed-history-card glass" id="speed-history-card">
-        <div class="speed-history-head"><div><p class="eyebrow">Internetverbinding</p><h2>Speedtesthistorie</h2></div><button type="button" class="button primary" id="run-speedtest">Nu testen</button></div>
+        <div class="speed-history-head"><div><p class="eyebrow">Internetverbinding</p><h2>Beschikbaarheid en snelheid</h2><p id="internet-health" class="muted tiny" aria-live="polite"></p></div><button type="button" class="button primary write-only" id="run-speedtest">Nu testen</button></div>
         <div class="speed-kpis"><div><span>Download</span><b id="speed-detail-down">—</b><small>Mbps</small></div><div><span>Upload</span><b id="speed-detail-up">—</b><small>Mbps</small></div><div><span>Ping</span><b id="speed-detail-ping">—</b><small>ms</small></div><div><span>Jitter</span><b id="speed-detail-jitter">—</b><small>ms</small></div></div>
         <div class="speed-chart" id="speed-chart" aria-hidden="true"></div>
         <details class="data-alternative"><summary>Speedtesthistorie als tabel</summary><div id="speed-history-text"></div></details>
@@ -146,6 +146,7 @@
         </section>
         <aside class="admin-side" aria-label="Beheerinstellingen en status">
           <div class="side-card glass"><div class="side-title">Applicatie</div><form id="app-settings-form" class="stack compact-form"><label>Titel<input name="title" required minlength="2" maxlength="80"></label><button class="button full" type="submit">Titel opslaan</button></form><p class="muted tiny">De titel verschijnt in de kop, op het inlogscherm en in het browsertabblad.</p></div>
+          <div class="side-card glass"><div class="side-title">Toegang</div><form id="user-form" class="stack compact-form"><label>Gebruikersnaam<input name="username" required minlength="2" maxlength="64" autocomplete="off"></label><label>Rol<select name="role"><option value="viewer">Kijker · alleen lezen</option><option value="admin">Beheerder · mag wijzigen</option></select></label><label>Tijdelijk wachtwoord<input name="password" type="password" required minlength="12" autocomplete="new-password"></label><button class="button full" type="submit">Gebruiker toevoegen</button></form><div id="users-list" class="mini-list"></div></div>
           <div class="side-card glass"><div class="side-title">Conflicten <span id="conflict-count" class="badge">0</span></div><div id="conflicts-list" class="mini-list"></div></div>
           <div class="side-card glass"><div class="side-title">Automatische back-ups</div><div id="backups-list" class="mini-list"></div><button type="button" class="button full" id="backup-import-button">Back-up importeren</button><p class="muted tiny">Download of herstel een consistente SQLite-kopie. Vóór herstel wordt automatisch een veiligheidsback-up gemaakt.</p></div>
           <div class="side-card glass"><div class="side-title">Matchingbeleid</div><ol class="policy-list"><li>Expliciete mapping</li><li>MAC-adres</li><li>Provider-native ID</li><li>Hostname/IP als voorstel</li></ol><span class="safety-note">Handmatig wint altijd</span></div>
@@ -178,7 +179,7 @@
       <div class="field-row"><label>IP-adres<input name="ip_address" inputmode="decimal"></label><label>MAC-adres<input name="mac_address" placeholder="aa:bb:cc:dd:ee:ff"></label></div>
       <label id="entity-uplink-field">Hangt aan (zonder poort)<select name="uplink_device_id" id="entity-uplink-select"></select><small class="muted" id="entity-uplink-hint"></small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
-      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="entity-delete-modal">Device verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Device opslaan</button></div>
     </form>
   </dialog>
 
@@ -190,7 +191,7 @@
       <div class="field-row"><label>Model<input name="model"></label><label>Locatie<input name="location"></label></div>
       <label>Statusmonitor<select name="monitor_entity_id" id="physical-monitor-select"></select><small class="muted">Bijvoorbeeld een Uptime Kuma-ping op het beheer-IP. Zonder koppeling blijft de status onbekend.</small></label>
       <label>Notities<textarea name="notes" rows="3"></textarea></label>
-      <div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary" id="physical-submit">Toevoegen</button></div>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="physical-delete-modal">Netwerkapparaat verwijderen</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary" id="physical-submit">Toevoegen</button></div>
     </form>
   </dialog>
 
@@ -249,8 +250,8 @@
       <label class="toggle-label compact"><input name="collapsed" type="checkbox"><span>Groep ingeklapt tonen</span></label>
       <label class="toggle-label compact"><input name="hidden" type="checkbox"><span>Verbergen in de topologie</span></label>
       <fieldset class="nudge-controls"><legend>Positie zonder slepen</legend><button type="button" class="icon-button" data-nudge-x="-1" aria-label="Node naar links">←</button><button type="button" class="icon-button" data-nudge-y="-1" aria-label="Node omhoog">↑</button><button type="button" class="icon-button" data-nudge-y="1" aria-label="Node omlaag">↓</button><button type="button" class="icon-button" data-nudge-x="1" aria-label="Node naar rechts">→</button><span class="muted tiny">Verplaatst per stap; werkt ook met toetsenbord en aanraking.</span></fieldset>
-      <p class="muted tiny">Een apparaat verwijder je in de patchview; de topologie is een weergave daarvan. Verbergen haalt het hier weg zonder iets te wissen — met de laag <em>verborgen</em> zet je het terug.</p>
-      <div class="modal-actions"><button type="button" class="button danger hidden" id="delete-topology-group">Groep verwijderen</button><button type="button" class="button hidden" id="open-topology-source">Apparaat bewerken…</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
+      <p class="muted tiny">Verbergen haalt dit alleen uit de tekening. Via <em>Apparaat beheren</em> kun je een handmatig device of netwerkapparaat ook definitief verwijderen, met een overzicht van de gevolgen.</p>
+      <div class="modal-actions"><button type="button" class="button danger hidden" id="delete-topology-group">Groep verwijderen</button><button type="button" class="button hidden" id="open-topology-source">Apparaat beheren…</button><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div>
     </form>
   </dialog>
 
@@ -274,7 +275,7 @@
   </dialog>
 
   <dialog id="speed-dialog" class="modal glass" aria-labelledby="speed-dialog-title">
-    <form id="speed-form" class="stack"><div class="modal-head"><div><p class="eyebrow">LibreSpeed</p><h2 id="speed-dialog-title">Speedtestinstellingen</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><label class="toggle-label compact"><input name="enabled" type="checkbox"><span>Automatische tests ingeschakeld</span></label><div class="field-row"><label>Interval<select name="interval_seconds"><option value="900">Elke 15 minuten</option><option value="1800">Elke 30 minuten</option><option value="3600">Elk uur</option><option value="7200">Elke 2 uur</option><option value="10800">Elke 3 uur</option><option value="21600">Elke 6 uur</option><option value="43200">Elke 12 uur</option><option value="86400">Dagelijks</option><option value="604800">Wekelijks</option></select></label><label>Testduur (seconden)<input name="duration_seconds" type="number" min="5" max="30"></label></div><div class="field-row"><label>Vaste server-ID<input name="server_id" placeholder="leeg = automatisch"></label><label>Netwerkinterface<input name="interface_name" placeholder="leeg = standaardroute"></label></div><p class="muted tiny">Telemetry blijft altijd uitgeschakeld. Resultaten blijven alleen in jouw SQLite-database.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div></form>
+    <form id="speed-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Internetmeting</p><h2 id="speed-dialog-title">Internetstatus en speedtest</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><label>Internetbeschikbaarheid via<select name="monitor_entity_id" id="internet-monitor-select"><option value="">— niet gemonitord —</option></select><small class="muted">Kies bijvoorbeeld een Uptime Kuma-monitor die een extern adres controleert. Een mislukte speedtest betekent niet automatisch dat internet offline is.</small></label><label class="toggle-label compact"><input name="enabled" type="checkbox"><span>Automatische speedtests ingeschakeld</span></label><div class="field-row"><label>Interval<select name="interval_seconds"><option value="900">Elke 15 minuten</option><option value="1800">Elke 30 minuten</option><option value="3600">Elk uur</option><option value="7200">Elke 2 uur</option><option value="10800">Elke 3 uur</option><option value="21600">Elke 6 uur</option><option value="43200">Elke 12 uur</option><option value="86400">Dagelijks</option><option value="604800">Wekelijks</option></select></label><label>Testduur (seconden)<input name="duration_seconds" type="number" min="5" max="30"></label></div><div class="field-row"><label>Vaste server-ID<input name="server_id" placeholder="leeg = automatisch"></label><label>Netwerkinterface<input name="interface_name" placeholder="leeg = standaardroute"></label></div><p class="muted tiny">Telemetry blijft altijd uitgeschakeld. Resultaten blijven alleen in jouw SQLite-database.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button type="submit" class="button primary">Opslaan</button></div></form>
   </dialog>
 
   <dialog id="merge-dialog" class="modal glass" aria-labelledby="merge-title"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
@@ -313,7 +314,7 @@
 
     <section class="wizard-panel" data-panel="1">
       <p class="muted">Zoek apparaten via de ARP-tabel en een ping-sweep. <strong>Alleen apparaten die aan staan en recent verkeer hadden verschijnen hier</strong> — dit is geen volledige inventaris.</p>
-      <label>Te scannen subnet(ten), komma-gescheiden<input id="wizard-subnets" placeholder="192.168.1.0/24"></label>
+      <label>Netwerkbereik om te scannen<input id="wizard-subnets" placeholder="bijv. 192.168.1.0/24"><small class="muted">Een subnet is je lokale adresreeks. Meerdere bereiken scheid je met een komma.</small></label>
       <p class="muted tiny" id="wizard-subnet-hint"></p>
       <div class="wizard-actions">
         <button type="button" class="button primary" id="wizard-scan">Scan starten</button>
@@ -323,7 +324,7 @@
     </section>
 
     <section class="wizard-panel hidden" data-panel="2">
-      <p class="muted">Vul in wat je gebruikt en test de verbinding vóór opslaan. Elke bron is overslaanbaar.</p>
+      <p class="muted">Kies alleen de systemen die je gebruikt. Open één bron, vul de gegevens in en test hem; de rest kun je veilig overslaan.</p>
       <div id="wizard-providers" class="wizard-providers"></div>
     </section>
 

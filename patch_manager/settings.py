@@ -14,6 +14,7 @@ class Settings:
     trusted_subnets: tuple[str, ...]
     backup_schedule_hour: int
     backup_retention_daily: int
+    seed_sample_inventory: bool
 
 
 def get_settings() -> Settings:
@@ -33,4 +34,8 @@ def get_settings() -> Settings:
         ),
         backup_schedule_hour=max(0, min(23, int(os.getenv("PATCH_BACKUP_SCHEDULE_HOUR", "3")))),
         backup_retention_daily=max(1, int(os.getenv("PATCH_BACKUP_RETENTION_DAILY", "14"))),
+        # Alleen bedoeld voor demo's en de bestaande acceptatietests. Een echte
+        # installatie hoort niet te doen alsof iemands switches en accesspoints
+        # al bekend zijn.
+        seed_sample_inventory=os.getenv("PATCH_SEED_SAMPLE_INVENTORY", "false").lower() == "true",
     )

@@ -237,8 +237,8 @@ def test_hiding_a_topology_node_can_be_undone(page: Page) -> None:
 def test_a_topology_node_leads_back_to_the_real_device(page: Page) -> None:
     """De topologie is een weergave; hij hoort niet dood te lopen.
 
-    Verwijderen kan hier bewust niet -- een knoop is geen ding maar een
-    afbeelding van een ding. Maar dan moet het ding zelf wel bereikbaar zijn.
+    De knoop opent het echte apparaatbeheer, inclusief de verwijderroute en
+    de gevolgenbevestiging van dat bronobject.
     """
     tab(page, "topology")
     page.click("#topology-edit")
@@ -257,8 +257,34 @@ def test_a_topology_node_leads_back_to_the_real_device(page: Page) -> None:
         settle(page)
     assert opened, "Geen enkele knoop leidde terug naar een device of netwerkapparaat"
     assert page.locator("#entity-dialog[open], #physical-dialog[open]").count() == 1
+    if page.locator("#physical-dialog[open]").count():
+        expect(page.locator("#physical-delete-modal")).to_be_visible()
+    else:
+        expect(page.locator("#entity-delete-modal")).to_be_visible()
     assert page.locator("#topology-node-dialog[open]").count() == 0, \
         "Het knoopdialoog hoort te sluiten; twee open dialogen over elkaar is geen UI"
+
+
+def test_manual_device_can_be_deleted_from_the_topology_route(page: Page) -> None:
+    page.click("#new-entity-button")
+    page.fill('#entity-form input[name="name"]', "Weg via topologie")
+    page.click('#entity-form button[type="submit"]')
+    settle(page)
+    entity = database.fetch_one("SELECT id FROM entities WHERE name='Weg via topologie'")
+    assert entity
+
+    tab(page, "topology")
+    page.click("#topology-edit")
+    node = page.locator(f'[data-node-id="entity:{entity["id"]}"]')
+    expect(node).to_be_visible()
+    node.click()
+    page.click("#open-topology-source")
+    expect(page.locator("#entity-delete-modal")).to_be_visible()
+    page.click("#entity-delete-modal")
+    accept_confirmation(page)
+    settle(page)
+    assert database.fetch_one("SELECT id FROM entities WHERE id=?", (entity["id"],)) is None
+    assert page.locator(f'[data-node-id="entity:{entity["id"]}"]').count() == 0
 
 
 def test_a_pending_link_is_visible_and_can_be_cancelled(with_discovery, page: Page) -> None:
@@ -390,6 +416,52 @@ def test_navigation_and_logout_explain_their_current_action(page: Page) -> None:
     assert page.locator("#logout-button").get_attribute("aria-label").startswith("Uitloggen als ")
 
 
+def test_viewer_has_a_clear_read_only_interface_and_can_logout(page: Page) -> None:
+    tab(page, "admin")
+    page.fill('#user-form input[name="username"]', "sanne")
+    page.select_option('#user-form select[name="role"]', "viewer")
+    page.fill('#user-form input[name="password"]', "veilig kijkwachtwoord")
+    page.click('#user-form button[type="submit"]')
+    settle(page)
+    expect(page.locator("#users-list")).to_contain_text("sanne")
+
+    page.click("#logout-button")
+    expect(page.locator("#auth-view")).to_be_visible()
+    page.fill('#auth-form input[name="username"]', "sanne")
+    page.fill('#auth-form input[name="password"]', "veilig kijkwachtwoord")
+    page.click('#auth-form button[type="submit"]')
+    page.wait_for_selector("#app-shell:not(.hidden)")
+    settle(page)
+
+    expect(page.locator("#role-label")).to_have_text("kijker")
+    expect(page.locator("#admin-tab")).to_be_hidden()
+    expect(page.locator("#new-entity-button")).to_be_hidden()
+    expect(page.locator("#new-physical-button")).to_be_hidden()
+    expect(page.locator("#topology-edit")).to_be_hidden()
+    expect(page.locator('[data-tab="patch"]')).to_have_attribute("aria-current", "page")
+    page.click("#logout-button")
+    expect(page.locator("#auth-view")).to_be_visible()
+
+
+def test_logout_clears_active_admin_tab_and_topology_edit_state(page: Page) -> None:
+    tab(page, "topology")
+    page.click("#topology-edit")
+    expect(page.locator("#topology-editbar")).to_be_visible()
+    tab(page, "admin")
+    page.click("#logout-button")
+    expect(page.locator("#auth-view")).to_be_visible()
+
+    page.fill('#auth-form input[name="username"]', CREDENTIALS["username"])
+    page.fill('#auth-form input[name="password"]', CREDENTIALS["password"])
+    page.click('#auth-form button[type="submit"]')
+    page.wait_for_selector("#app-shell:not(.hidden)")
+    settle(page)
+    expect(page.locator('[data-tab="patch"]')).to_have_attribute("aria-current", "page")
+    expect(page.locator("#topology-editbar")).to_be_hidden()
+    tab(page, "topology")
+    expect(page.locator("#topology-edit")).to_be_visible()
+
+
 def test_provider_configuration_has_guided_fields(page: Page) -> None:
     """Een normale databron configureren hoort geen JSON-kennis te vereisen."""
     tab(page, "admin")
@@ -421,6 +493,51 @@ def test_guided_provider_values_can_be_tested_and_saved(page: Page) -> None:
     card.locator("[data-provider-edit]").click()
     assert page.input_value('[data-provider-config="subnets"]') == "127.0.0.0/30"
     assert not page.is_checked('[data-provider-config="scan"]')
+
+
+def test_invalid_enabled_provider_stays_open_and_is_not_saved(page: Page) -> None:
+    tab(page, "admin")
+    card = page.locator(".provider-card", has_text="Portainer").first
+    card.locator("[data-provider-edit]").click()
+    page.check('#provider-form input[name="enabled"]')
+    page.fill('#provider-form [data-provider-config="base_url"]', "https://portainer.local")
+    page.click('#provider-form button[type="submit"]')
+    expect(page.locator("#provider-dialog")).to_be_visible()
+    expect(page.locator("#provider-test-result")).to_contain_text("API-key")
+    page.click('#provider-dialog .modal-close')
+    settle(page)
+    card = page.locator(".provider-card", has_text="Portainer").first
+    expect(card.locator(".provider-state")).to_have_text("uit")
+
+
+def test_wizard_shows_provider_choices_before_provider_forms(page: Page) -> None:
+    tab(page, "admin")
+    page.click("#open-wizard")
+    page.click("#wizard-next")
+    expect(page.locator('[data-panel="2"]')).to_be_visible()
+    provider_choices = page.locator("#wizard-providers details[data-wizard-provider]")
+    assert provider_choices.count() >= 6
+    assert page.locator("#wizard-providers details[open]").count() == 0
+    text = page.locator("#wizard-providers").inner_text()
+    assert "uptime_kuma" not in text and "nginx_proxy_manager" not in text
+    provider_choices.first.locator("summary").click()
+    expect(provider_choices.first).to_have_attribute("open", "")
+    expect(provider_choices.first.locator('[data-wizard-url]')).to_be_visible()
+    page.click("#wizard-close")
+    settle(page)
+
+
+def test_search_keeps_the_header_context_visible_after_selection(page: Page) -> None:
+    width_before = page.locator("#search-input").bounding_box()["width"]
+    page.fill("#search-input", "SG108E")
+    expect(page.locator("#search-results")).to_be_visible()
+    page.locator("#search-results [data-hit-id]").first.click()
+    settle(page)
+    expect(page.locator("#app-shell .brand")).to_be_visible()
+    expect(page.locator("#speed-indicator")).to_be_visible()
+    expect(page.locator("#logout-button")).to_be_visible()
+    assert page.locator("#search-input").input_value() == ""
+    assert abs(page.locator("#search-input").bounding_box()["width"] - width_before) < 2
 
 
 def test_every_tab_renders_without_errors(page: Page) -> None:
@@ -519,6 +636,10 @@ def test_admin_primary_actions_remain_readable_on_a_phone(page: Page) -> None:
 
 
 def test_speedtest_dialog_offers_the_full_supported_interval_range(page: Page) -> None:
+    expect(page.locator("#internet-status")).to_have_text("internet niet gemonitord")
+    expect(page.locator("#speed-age")).to_have_text("nog geen speedtest")
+    tab(page, "topology")
+    expect(page.locator("#internet-health")).to_contain_text("niet gemonitord")
     tab(page, "admin")
     page.click("#speed-settings-button")
     options = page.locator("#speed-form select[name=interval_seconds] option").evaluate_all(
@@ -568,7 +689,7 @@ def test_topology_has_text_status_and_non_drag_controls(page: Page) -> None:
     expect(page.locator("#topology-text-summary table").first).to_be_attached()
     assert page.locator("#topology-text-summary tbody tr").count() >= 2
     statuses = page.locator("#topology-text-summary table").first.locator("tbody td:nth-child(2)").all_text_contents()
-    assert statuses and set(statuses) <= {"up", "down", "verminderd", "onbekend"}
+    assert statuses and set(statuses) <= {"online", "offline", "storing", "niet gemonitord"}
     assert page.locator("#topology-canvas .topo-status").count() >= 2
 
     before_view = page.locator("#topology-canvas").get_attribute("viewBox")

@@ -183,14 +183,13 @@ def test_glances_refuses_an_endpoint_without_a_device(monkeypatch: pytest.Monkey
     glances_transport(monkeypatch, [])
     with TestClient(app) as client:
         headers = login(client)
-        client.patch(
+        response = client.patch(
             "/api/providers/glances", headers=headers,
             json={"enabled": True, "poll_interval_seconds": 60, "credentials": {}, "config": {"endpoints": [
                 {"name": "vergeten", "url": "http://host-c:61208/api/4"},
             ]}},
         )
-        response = client.post("/api/providers/glances/sync", headers=headers)
-        assert response.status_code == 400, response.text
+        assert response.status_code == 422, response.text
         assert "vergeten" in response.json()["detail"]
 
 

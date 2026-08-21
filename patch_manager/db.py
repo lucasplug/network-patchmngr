@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin' CHECK(role IN ('admin','viewer')),
   created_at TEXT NOT NULL
 );
 
@@ -328,12 +329,13 @@ CREATE TABLE IF NOT EXISTS proxy_hosts (
 
 CREATE TABLE IF NOT EXISTS speedtest_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 0,
   interval_seconds INTEGER NOT NULL DEFAULT 21600,
   server_id TEXT,
   interface_name TEXT,
   duration_seconds INTEGER NOT NULL DEFAULT 10,
   telemetry_enabled INTEGER NOT NULL DEFAULT 0,
+  monitor_entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL,
   last_run_at TEXT,
   last_error TEXT,
   updated_at TEXT NOT NULL
@@ -362,7 +364,7 @@ CREATE TABLE IF NOT EXISTS speedtest_runs (
 # Verhoog SCHEMA_VERSION bij elke wijziging aan SCHEMA die een bestaande
 # database raakt, en zet de bijbehorende stap in MIGRATIONS. Een nieuwe tabel
 # hoeft geen stap: CREATE TABLE IF NOT EXISTS regelt die zelf.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
@@ -426,7 +428,18 @@ def _migration_002(connection: sqlite3.Connection) -> None:
         )
 
 
-MIGRATIONS = {2: _migration_002}
+def _migration_003(connection: sqlite3.Connection) -> None:
+    """Kijkersaccounts en een expliciete monitor voor internetbeschikbaarheid."""
+    _add_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'admin'")
+    _add_column(
+        connection,
+        "speedtest_settings",
+        "monitor_entity_id",
+        "TEXT REFERENCES entities(id) ON DELETE SET NULL",
+    )
+
+
+MIGRATIONS = {2: _migration_002, 3: _migration_003}
 
 
 DEVICE_TEMPLATES = [
@@ -441,23 +454,24 @@ DEVICE_TEMPLATES = [
 ]
 
 PROVIDER_TEMPLATES = [
-    ("dhcp-arp", "dhcp_arp", "DHCP / ARP discovery", 300, {"subnets": ["192.168.1.0/24"], "scan": True}),
-    ("uptime-kuma", "uptime_kuma", "Uptime Kuma", 60, {"base_url": "", "status_page_slug": "homelab"}),
+    ("dhcp-arp", "dhcp_arp", "DHCP / ARP discovery", 300, {"subnets": [], "scan": False}),
+    ("uptime-kuma", "uptime_kuma", "Uptime Kuma", 60, {"base_url": "", "status_page_slug": ""}),
     # entity_id per endpoint: Glances draait op meerdere machines en de
     # hostnaam die het teruggeeft komt niet altijd overeen met hoe het
     # apparaat hier heet. Daarom wijs je het device zelf aan; matchen op
     # hostnaam leverde dubbele hosts op.
-    ("glances", "glances", "Glances", 60, {"endpoints": [{"name": "docker-vm", "url": "http://192.168.1.12:61208/api/4", "entity_id": None}]}),
-    ("portainer", "portainer", "Portainer", 60, {"base_url": "https://192.168.1.12:9443", "verify_tls": False}),
-    ("proxmox", "proxmox", "Proxmox VE", 60, {"base_url": "https://192.168.1.100:8006", "user": "readonly@pve", "token_name": "patchmanager", "verify_tls": False}),
-    ("adguard", "adguard", "AdGuard Home", 300, {"base_url": "http://192.168.1.12:3000", "import_clients": True, "import_rewrites": True, "verify_tls": True}),
-    ("nginx-proxy-manager", "nginx_proxy_manager", "Nginx Proxy Manager", 300, {"base_url": "http://192.168.1.12:81", "verify_tls": True}),
+    ("glances", "glances", "Glances", 60, {"endpoints": []}),
+    ("portainer", "portainer", "Portainer", 60, {"base_url": "", "verify_tls": True}),
+    ("proxmox", "proxmox", "Proxmox VE", 60, {"base_url": "", "user": "", "token_name": "", "verify_tls": True}),
+    ("adguard", "adguard", "AdGuard Home", 300, {"base_url": "", "import_clients": True, "import_rewrites": True, "verify_tls": True}),
+    ("nginx-proxy-manager", "nginx_proxy_manager", "Nginx Proxy Manager", 300, {"base_url": "", "verify_tls": True}),
 ]
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, seed_sample_inventory: bool = False):
         self.path = path
+        self.seed_sample_inventory = seed_sample_inventory
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
@@ -485,9 +499,10 @@ class Database:
                 "SELECT value FROM app_meta WHERE key='physical_inventory_seeded'"
             ).fetchone()
             if not inventory_seeded:
-                # Existing installations already contain the starter inventory.
-                # Mark it as seeded so deliberately deleted templates never return.
-                if connection.execute("SELECT COUNT(*) FROM physical_devices").fetchone()[0] == 0:
+                # Leg de keuze één keer vast. Productie blijft leeg; alleen een
+                # expliciete demo-installatie krijgt voorbeeldapparatuur. Wat er
+                # al stond blijft ongemoeid en verwijderde demo-items keren niet terug.
+                if self.seed_sample_inventory and connection.execute("SELECT COUNT(*) FROM physical_devices").fetchone()[0] == 0:
                     self._seed_physical_devices(connection)
                 connection.execute(
                     "INSERT INTO app_meta(key,value) VALUES('physical_inventory_seeded','1')"
@@ -497,7 +512,7 @@ class Database:
             connection.execute(
                 """INSERT OR IGNORE INTO speedtest_settings
                    (id,enabled,interval_seconds,duration_seconds,telemetry_enabled,updated_at)
-                   VALUES(1,1,21600,10,0,?)""",
+                   VALUES(1,0,21600,10,0,?)""",
                 (utcnow(),),
             )
             connection.execute(
@@ -609,6 +624,11 @@ class Database:
                VALUES('special:internet','special','internet','internet','','external',510,24,150,52,1,?,?)""",
             (now, now),
         )
+        # Alleen demo-/bestaande inventarissen hebben de vaste ONT. Een verse
+        # productie-installatie toont uitsluitend de internetknoop tot de
+        # gebruiker zelf apparatuur toevoegt.
+        if not connection.execute("SELECT 1 FROM physical_devices WHERE id='ont-01'").fetchone():
+            return
         # Het internet komt binnen op de ONT, niet op een losse 'router'-knoop.
         # Die knoop was een kopie van een Deco die nergens aan vastzat.
         # De knoop moet er staan vóór de relatie: topology_relations verwijst

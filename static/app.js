@@ -1,4 +1,4 @@
-const state = { data: null, csrf: null, setupRequired: false, activeTab: "patch", pendingEntityId: null, editingTopology: false, topologyPositions: new Map(), selectedNodes: new Set(), groupSelected: false };
+const state = { data: null, csrf: null, role: null, setupRequired: false, activeTab: "patch", pendingEntityId: null, editingTopology: false, topologyPositions: new Map(), selectedNodes: new Set(), groupSelected: false };
 let portDrawerReturnFocus = null;
 let entityDrawerReturnFocus = null;
 
@@ -7,6 +7,27 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value = "") => String(value).replace(/[&<>'"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const formatTime = value => value ? new Intl.DateTimeFormat("nl-NL", {day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}).format(new Date(value)) : "nog nooit";
 const formatBytes = bytes => bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+const canWrite = () => Boolean(state.data?.auth?.can_write ?? state.role === "admin");
+
+function resetSessionState() {
+  state.data = null;
+  state.csrf = null;
+  state.role = null;
+  state.activeTab = "patch";
+  state.pendingEntityId = null;
+  state.editingTopology = false;
+  state.topologyPositions.clear();
+  state.selectedNodes.clear();
+  dragPayload = null;
+  document.body.classList.remove("viewer-mode");
+  $("#app-shell")?.classList.remove("viewer-mode");
+  $$("dialog[open]").forEach(dialog => dialog.close());
+  $("#topology-editbar")?.classList.add("hidden");
+  $("#topology-edit")?.classList.remove("hidden");
+  if ($("#search-input")) $("#search-input").value = "";
+  $("#search-results")?.classList.add("hidden");
+  switchTab("patch");
+}
 
 const PROVIDER_TYPE_LABELS = {
   adguard: "DNS en netwerkclients",
@@ -20,12 +41,12 @@ const PROVIDER_TYPE_LABELS = {
 
 const PROVIDER_CONFIG_UI = {
   dhcp_arp: [
-    {key:"subnets", label:"Te scannen subnetten", kind:"list", placeholder:"192.168.1.0/24", help:"Komma-gescheiden. Ieder subnet moet binnen PATCH_TRUSTED_SUBNETS vallen en mag maximaal 1024 adressen bevatten."},
+    {key:"subnets", label:"Netwerkbereiken (subnets)", kind:"list", placeholder:"192.168.1.0/24", help:"Een subnet is een lokale adresreeks. Scheid meerdere bereiken met een komma; maximaal 1024 adressen per bereik."},
     {key:"scan", label:"Naast de ARP-tabel ook actief pingen", kind:"boolean"},
   ],
   uptime_kuma: [
     {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://kuma.home.arpa"},
-    {key:"status_page_slug", label:"Statuspagina-slug", kind:"text", placeholder:"homelab", help:"Het laatste deel van de publieke statuspagina-URL."},
+    {key:"status_page_slug", label:"Naam in de statuspagina-URL", kind:"text", placeholder:"homelab", help:"Bij …/status/homelab vul je alleen homelab in."},
   ],
   portainer: [
     {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://portainer.home.arpa"},
@@ -33,8 +54,8 @@ const PROVIDER_CONFIG_UI = {
   ],
   proxmox: [
     {key:"base_url", label:"Basis-URL", kind:"url", placeholder:"https://proxmox.home.arpa:8006"},
-    {key:"user", label:"Gebruiker (user@realm)", kind:"text", placeholder:"readonly@pve"},
-    {key:"token_name", label:"Token-ID", kind:"text", placeholder:"patchmanager"},
+    {key:"user", label:"Proxmox-gebruiker", kind:"text", placeholder:"readonly@pve", help:"Inclusief realm, bijvoorbeeld readonly@pve."},
+    {key:"token_name", label:"Naam van het API-token", kind:"text", placeholder:"patchmanager", help:"Alleen het deel na het uitroepteken in user@realm!tokennaam."},
     {key:"verify_tls", label:"TLS-certificaat controleren", kind:"boolean"},
   ],
   adguard: [
@@ -73,7 +94,10 @@ async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("json") ? await response.json() : await response.text();
   if (!response.ok) {
-    if (response.status === 401 && !path.includes("/auth/")) showAuth(false);
+    if (response.status === 401 && !path.includes("/auth/")) {
+      resetSessionState();
+      showAuth(false);
+    }
     throw new Error(errorMessage(body, response.status));
   }
   return body;
@@ -118,6 +142,7 @@ async function initialize() {
     state.setupRequired = auth.setup_required;
     if (auth.authenticated) {
       state.csrf = auth.csrf_token;
+      state.role = auth.role;
       $("#username").textContent = auth.username;
       $("#avatar").textContent = auth.username.slice(0, 1).toUpperCase();
       $("#logout-button").setAttribute("aria-label", `Uitloggen als ${auth.username}`);
@@ -135,16 +160,21 @@ function showAuth(setup) {
   $("#auth-view").classList.remove("hidden");
   $("#auth-title").textContent = setup ? "Eerste beheerder" : "Inloggen";
   $("#auth-eyebrow").textContent = setup ? "Eenmalige veilige configuratie" : "Lokale netwerkadministratie";
-  $("#auth-copy").textContent = setup ? "Maak het lokale adminaccount aan. Daarna wordt deze setup definitief gesloten." : "Alleen beheerders hebben toegang tot patch- en providergegevens.";
+  $("#auth-copy").textContent = setup ? "Maak het lokale adminaccount aan. Daarna wordt deze setup definitief gesloten." : "Beheerders kunnen wijzigen; kijkers hebben een veilige alleen-lezenweergave.";
   $("#auth-submit-label").textContent = setup ? "Beheerder aanmaken" : "Inloggen";
   $("#auth-form input[name=password]").autocomplete = setup ? "new-password" : "current-password";
 }
 
 async function showApp() {
+  state.activeTab = "patch";
+  state.pendingEntityId = null;
+  state.editingTopology = false;
   $("#auth-view").classList.add("hidden");
   $("#app-shell").classList.remove("hidden");
   await loadData();
+  switchTab("patch");
   // Na de allereerste setup meteen begeleid inrichten; daarna alleen op verzoek.
+  if (!canWrite()) return;
   try {
     const info = await api("/api/wizard/info");
     if (!info.dismissed) await openWizard();
@@ -189,7 +219,13 @@ async function pollSummary() {
     }));
     state.data.counts = summary.counts;
     state.data.app_links = summary.app_links || state.data.app_links;
-    state.data.speedtest = {...state.data.speedtest, ...summary.speedtest};
+    state.data.speedtest = {
+      ...state.data.speedtest,
+      ...summary.speedtest,
+      settings:{...(state.data.speedtest?.settings||{}),...(summary.speedtest?.settings||{})},
+    };
+    const internetNode=(state.data.topology?.nodes||[]).find(node=>node.reference_type==="special"&&node.reference_id==="internet");
+    if(internetNode&&summary.speedtest?.internet)internetNode.status=summary.speedtest.internet.status;
     renderAll();
     stampRefresh();
   } catch (error) { /* stille poll: fouten verschijnen bij de volgende actie */ }
@@ -197,12 +233,14 @@ async function pollSummary() {
 
 function renderAll() {
   applyBranding(state.data.site);
-  $("#app-settings-form").elements.title.value = state.data.site.title;
+  state.role = state.data.auth?.role || state.role;
+  applyAccessMode();
+  if (canWrite()) $("#app-settings-form").elements.title.value = state.data.site.title;
   renderSummary();
   renderPatch();
   renderApps();
   renderTopology();
-  renderAdmin();
+  if (canWrite()) renderAdmin();
   // Alleen ophalen als het paneel ook zichtbaar is: dit draait ook op de
   // poll van elke 30 seconden, en dan is het een verzoek om niets.
   if (state.activeTab === "admin") renderChanges();
@@ -210,17 +248,26 @@ function renderAll() {
 }
 
 function statusDot(status) { return `<i class="status-dot ${["up","down","degraded"].includes(status) ? status : "unknown"}" aria-hidden="true"></i>`; }
-function statusLabel(status) { return ({up:"up",down:"down",degraded:"verminderd",unknown:"onbekend"})[status] || "onbekend"; }
+function statusLabel(status) { return ({up:"online",down:"offline",degraded:"storing",unknown:"niet gemonitord"})[status] || "niet gemonitord"; }
+
+function applyAccessMode() {
+  const viewer = !canWrite();
+  $("#app-shell").classList.toggle("viewer-mode", viewer);
+  $("#admin-tab").classList.toggle("hidden", viewer);
+  $("#role-label").textContent = viewer ? "kijker" : "beheerder";
+  if (viewer && state.activeTab === "admin") switchTab("patch");
+}
 
 function renderSummary() {
   const c = state.data.counts;
-  $("#summary-chips").innerHTML = [
+  const chips = [
     [`${c.patched}`, "kabels vastgelegd", ""],
-    [c.up, "devices up", "up"],
-    [c.down, "devices down", "down"],
+    [c.up, "devices online", "up"],
+    [c.down, "devices offline", "down"],
     [c.unlinked, "ongekoppeld", "unknown"],
-    [c.conflicts, "conflicten", c.conflicts ? "degraded" : "up"],
-  ].map(([value,label,status]) => `<span class="chip">${status ? statusDot(status) : ""}<b>${value}</b> ${label}</span>`).join("");
+  ];
+  if (canWrite()) chips.push([c.conflicts, "conflicten", c.conflicts ? "degraded" : "up"]);
+  $("#summary-chips").innerHTML = chips.map(([value,label,status]) => `<span class="chip">${status ? statusDot(status) : ""}<b>${value}</b> ${label}</span>`).join("");
   const attention = c.unlinked + c.conflicts;
   $("#admin-badge").textContent = attention;
   $("#admin-badge").classList.toggle("hidden", attention === 0);
@@ -241,7 +288,7 @@ function portFace(port, device) {
   const tip = `${device.name} · poort ${port.number}${port.side === "rear" ? " (achter)" : ""}: ${portLabelFor(port)}${port.cable_label ? ` · kabel ${port.cable_label}` : ""}`;
   return `<button type="button" class="port-face ${port.cable_id ? "occupied" : ""} status-${esc(status)}"
       data-port-id="${esc(port.id)}" data-device-id="${esc(device.id)}" data-drop-port="${esc(port.id)}"
-      ${port.cable_id ? 'draggable="true"' : ""} title="${esc(tip)}" aria-label="${esc(tip)}">
+      ${canWrite() && port.cable_id ? 'draggable="true"' : ""} title="${esc(tip)}" aria-label="${esc(tip)}">
     <span class="face-num">${String(port.number).padStart(2, "0")}${port.side === "rear" ? "r" : ""}</span>
     <span class="face-cable" style="background:${port.cable_id ? cableColor(port.cable_color) : "transparent"}"></span>
   </button>`;
@@ -257,7 +304,7 @@ function deviceFace(device) {
         <div><div class="device-title">${device.monitor_entity_id
           ? `<button type="button" class="status-button" data-device-history="${esc(device.id)}" title="Uptime van ${esc(device.monitor_name || "de monitor")}" aria-label="${esc(device.name)}: status ${esc(statusLabel(device.status))}; uptime openen">${statusDot(device.status)}</button>`
           : statusDot(device.status)} ${esc(device.name)}</div><div class="device-meta">${esc(device.model || device.type)}${device.location ? ` · ${esc(device.location)}` : ""} · ${used}/${device.ports.length} bezet${device.monitor_name ? ` · status via ${esc(device.monitor_name)}` : ""}</div></div>
-        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span><button type="button" class="icon-button" data-physical-edit="${device.id}" title="Bewerken" aria-label="${esc(device.name)} bewerken">✎</button><button type="button" class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button></div>
+        <div class="device-head-actions"><span class="device-kind">${esc(categoryLabel(device.type).toUpperCase())}</span>${canWrite() ? `<button type="button" class="icon-button" data-physical-edit="${device.id}" title="Bewerken" aria-label="${esc(device.name)} bewerken">✎</button><button type="button" class="icon-button danger-icon" data-physical-delete="${device.id}" title="Netwerkapparaat verwijderen" aria-label="${esc(device.name)} verwijderen">×</button>` : ""}</div>
       </header>
       <div class="device-front">${fronts.map(port => portFace(port, device)).join("")}</div>
       ${rears.length ? `<div class="front-label">achterzijde</div><div class="device-front rear">${rears.map(port => portFace(port, device)).join("")}</div>` : ""}
@@ -275,11 +322,12 @@ function renderPatch() {
   renderUnpatched();
   const manual=state.data.entities.filter(entity=>entity.origin==="manual");
   $("#manual-entity-count").textContent=`${manual.length} devices`;
-  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><button type="button" class="link" data-entity-open="${esc(entity.id)}">${esc(entity.name)}</button><span>${esc(categoryLabel(entity.type))} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-entity-edit="${entity.id}">Wijzig</button><button type="button" class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div></div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
+  $("#manual-entities-list").innerHTML=manual.length?manual.map(entity=>`<div class="data-row entity-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><button type="button" class="link" data-entity-open="${esc(entity.id)}">${esc(entity.name)}</button><span>${esc(categoryLabel(entity.type))} · handmatig</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address||entity.hostname||"—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div>${canWrite()?`<div class="row-actions"><button type="button" class="button" data-entity-edit="${entity.id}">Wijzig</button><button type="button" class="button danger" data-entity-delete="${entity.id}">Verwijder</button></div>`:""}</div>`).join(""):`<div class="empty-state">Nog geen handmatige devices.</div>`;
 }
 
 // Zijlijst: devices zonder kabel, sleepbaar naar een poort.
 function renderUnpatched() {
+  if (!canWrite()) return;
   const linked = new Set(state.data.physical_devices.flatMap(device =>
     device.ports.filter(port => port.link_kind === "entity").map(port => port.entity_id)));
   // Al geplaatst: hangt poortloos aan een netwerkapparaat, of levert er de
@@ -531,7 +579,7 @@ function renderAdmin() {
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
-      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(PROVIDER_TYPE_LABELS[provider.type] || provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "gereed") : "uit"}</span></div>
+      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(PROVIDER_TYPE_LABELS[provider.type] || provider.type)}</div></div></div><span class="provider-state ${status}">${provider.enabled ? (status === "error" ? "fout" : status === "ok" ? "actief" : "ingeschakeld · nog niet opgehaald") : "uit"}</span></div>
       <div class="provider-details"><div><span>Laatste succes</span><b>${formatTime(provider.last_success_at)}</b></div><div><span>Interval</span><b>${provider.poll_interval_seconds}s</b></div></div>
       ${provider.last_error ? `<p class="form-error tiny" title="${esc(provider.last_error)}">${esc(shorten(provider.last_error, 62))}</p>` : ""}
       <div class="provider-actions"><button type="button" class="button" data-provider-edit="${provider.id}">Configureren</button><button type="button" class="button" data-provider-sync="${provider.id}">Nu ophalen</button>${
@@ -541,12 +589,12 @@ function renderAdmin() {
   }).join("");
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
   $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(entity.status)}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
+    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#uplink-count").textContent = `${uplinked.length} gekoppeld`;
   $("#uplinks-list").innerHTML = uplinked.length ? uplinked.map(entity => `
     <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button type="button" class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
   $("#inactive-discovery-count").textContent=`${inactive.length} items`;
-  $("#inactive-discoveries-list").innerHTML=inactive.length?inactive.map(entity=>`<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${entity.archived?"gearchiveerd":"genegeerd"}</span></div></div><div>${esc(entity.ip_address||entity.hostname||"—")}</div><div>${statusDot(entity.status)} ${esc(entity.status)}</div><button type="button" class="button" data-discovery-state="restore" data-entity-id="${entity.id}">Herstellen</button></div>`).join(""):`<div class="empty-state">Geen genegeerde of gearchiveerde discoveries.</div>`;
+  $("#inactive-discoveries-list").innerHTML=inactive.length?inactive.map(entity=>`<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${entity.archived?"gearchiveerd":"genegeerd"}</span></div></div><div>${esc(entity.ip_address||entity.hostname||"—")}</div><div>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><button type="button" class="button" data-discovery-state="restore" data-entity-id="${entity.id}">Herstellen</button></div>`).join(""):`<div class="empty-state">Geen genegeerde of gearchiveerde discoveries.</div>`;
   const mappings=(state.data.provider_records||[]).slice(0,250);$("#mapping-count").textContent=`${state.data.provider_records?.length||0} records`;
   $("#provider-mappings-list").innerHTML=mappings.length?mappings.map(record=>`<div class="data-row mapping-row"><div class="data-main"><span class="data-icon">${providerIcon((state.data.providers.find(p=>p.id===record.provider_id)||{}).type)}</span><div><strong>${esc(record.external_id)}</strong><span>${esc(record.provider_name)} · ${esc(record.kind)}</span></div></div><div>${esc(record.entity_name||"niet gekoppeld")}</div><div>${formatTime(record.last_seen_at)}</div><button type="button" class="button" data-mapping-edit="${record.id}">Koppelen</button></div>`).join(""):`<div class="empty-state">Nog geen providerrecords.</div>`;
   const openConflicts = state.data.conflicts.filter(item => item.status === "open");
@@ -558,6 +606,8 @@ function renderAdmin() {
   $("#proxy-count").textContent=`${state.data.proxy_hosts.length} hosts`;
   $("#proxy-list").innerHTML = state.data.proxy_hosts.length ? state.data.proxy_hosts.map(host=>`<div class="data-row proxy-row"><div class="data-main"><span class="data-icon">↗</span><div><strong>${esc((host.domains||[]).join(", ")||"Naamloos")}</strong><span>Nginx Proxy Manager · read-only</span></div></div><div><span class="data-cell-label">Doel</span><br>${esc(host.forward_scheme)}://${esc(host.forward_host)}:${host.forward_port||"—"}</div><div><span class="data-cell-label">Status</span><br>${statusDot(host.enabled?"up":"down")} ${host.enabled?"actief":"uit"}</div><span class="pill">${esc(entityNames.get(host.entity_id)||"niet gekoppeld")}</span></div>`).join("") : `<div class="empty-state">Nog geen proxyhosts. Configureer en synchroniseer Nginx Proxy Manager.</div>`;
   $("#audit-list").innerHTML=(state.data.audit_log||[]).length?state.data.audit_log.map(item=>`<div class="data-row audit-row"><div class="data-main"><span class="data-icon">⌁</span><div><strong>${esc(item.action)}</strong><span>${esc(item.username||"systeem")} · ${esc(item.target_type)}</span></div></div><div>${esc(item.target_id||"—")}</div><div>${formatTime(item.created_at)}</div></div>`).join(""):`<div class="empty-state">Nog geen beheeracties.</div>`;
+  const users=state.data.users||[];
+  $("#users-list").innerHTML=users.map(user=>`<div class="mini-item"><strong>${esc(user.username)}${user.username===state.data.auth.username?" · jij":""}</strong><p>${user.role==="admin"?"Beheerder · mag wijzigen":"Kijker · alleen lezen"}</p>${user.username!==state.data.auth.username?`<button type="button" class="button danger" data-user-delete="${esc(user.id)}">Verwijderen</button>`:""}</div>`).join("");
 }
 
 function providerIcon(type) { return ({dhcp_arp:"⌁",uptime_kuma:"◉",glances:"▥",portainer:"⬡",proxmox:"◇",adguard:"DNS",nginx_proxy_manager:"↗"})[type] || "·"; }
@@ -586,21 +636,29 @@ function categoryOptions(selected, {physical = false} = {}) {
 }
 
 function renderSpeedtest() {
-  const speed=state.data.speedtest||{}, latest=speed.latest, settings=speed.settings||{};
+  const speed=state.data.speedtest||{}, latest=speed.latest, settings=speed.settings||{},internet=speed.internet||{};
   const fmt=value=>value===null||value===undefined?"—":Number(value).toFixed(1);
   $("#speed-down").textContent=latest?`${fmt(latest.download_mbps)} M`:"—";
   $("#speed-up").textContent=latest?`${fmt(latest.upload_mbps)} M`:"—";
   $("#speed-ping").textContent=latest?`${fmt(latest.ping_ms)} ms`:"— ms";
-  $("#speed-age").textContent=speed.running?"test loopt…":latest?formatTime(latest.completed_at):settings.last_error?"laatste test mislukt":"nog niet gemeten";
+  const speedUnavailable=String(settings.last_error||"").includes("is niet geïnstalleerd");
+  $("#speed-age").textContent=speed.running?"speedtest loopt…":latest?`gemeten ${formatTime(latest.completed_at)}`:speedUnavailable?"speedtest niet beschikbaar":settings.last_error?"speedtest mislukt":"nog geen speedtest";
+  $("#internet-status").textContent=internet.configured?`internet ${statusLabel(internet.status)}`:"internet niet gemonitord";
+  const internetText=!internet.configured
+    ? "Internetstatus: niet gemonitord. Een speedtest meet snelheid, niet live beschikbaarheid."
+    : `Internetstatus: ${statusLabel(internet.status)} via ${internet.entity_name||"de gekozen monitor"}${internet.updated_at?` · ${formatTime(internet.updated_at)}`:""}.`;
+  $("#internet-health").textContent=internetText+(settings.last_error?` Laatste speedtest: ${speedUnavailable?"runner niet beschikbaar":"mislukt"}.`:"");
+  $("#speed-indicator").title=internetText;
   $("#speed-indicator").classList.toggle("running",Boolean(speed.running));
   [["down","download_mbps"],["up","upload_mbps"],["ping","ping_ms"],["jitter","jitter_ms"]].forEach(([id,key])=>$("#speed-detail-"+id).textContent=latest?fmt(latest[key]):"—");
   const history=(speed.history||[]).slice(0,24).reverse(), max=Math.max(1,...history.map(item=>Number(item.download_mbps)||0));
   $("#speed-chart").innerHTML=history.length?history.map(item=>`<div class="speed-bar-wrap" title="${esc(formatTime(item.completed_at))}: ↓ ${fmt(item.download_mbps)} / ↑ ${fmt(item.upload_mbps)} Mbps"><i class="speed-bar" style="height:${Math.max(3,(Number(item.download_mbps)||0)/max*100)}%"></i></div>`).join(""):`<div class="empty-state">Na de eerste test verschijnt hier de historie.</div>`;
   $("#speed-history-text").innerHTML=history.length?`<div class="table-scroll"><table class="accessible-table"><caption class="sr-only">Speedtesthistorie</caption><thead><tr><th scope="col">Tijd</th><th scope="col">Download (Mbps)</th><th scope="col">Upload (Mbps)</th><th scope="col">Ping (ms)</th><th scope="col">Jitter (ms)</th></tr></thead><tbody>${history.map(item=>`<tr><td>${esc(formatTime(item.completed_at))}</td><td>${esc(fmt(item.download_mbps))}</td><td>${esc(fmt(item.upload_mbps))}</td><td>${esc(fmt(item.ping_ms))}</td><td>${esc(fmt(item.jitter_ms))}</td></tr>`).join("")}</tbody></table></div>`:`<p class="empty-table">Na de eerste test verschijnt hier de historie.</p>`;
-  $("#speed-settings-summary").innerHTML=`<div class="mini-item"><strong>${settings.enabled?"Automatisch actief":"Automatisch uit"}</strong><p>${formatInterval(settings.interval_seconds)} · ${settings.duration_seconds||10}s testduur<br>${settings.last_error?esc(shorten(settings.last_error,90)):"Telemetry uit · lokaal opgeslagen"}</p></div>`;
+  if(canWrite())$("#speed-settings-summary").innerHTML=`<div class="mini-item"><strong>Internet ${internet.configured?esc(statusLabel(internet.status)):"niet gemonitord"}</strong><p>${internet.configured?`via ${esc(internet.entity_name||"gekozen monitor")}`:"Kies een externe beschikbaarheidsmonitor in Instellingen."}<br>Speedtest: ${settings.enabled?esc(formatInterval(settings.interval_seconds)):"automatisch uit"}${settings.last_error?` · ${speedUnavailable?"runner ontbreekt":"laatste meting mislukt"}`:""}</p></div>`;
 }
 
 function switchTab(tab) {
+  if (tab === "admin" && !canWrite()) tab = "patch";
   state.activeTab = tab;
   $$(".tab").forEach(item => {
     const active = item.dataset.tab === tab;
@@ -613,6 +671,7 @@ function switchTab(tab) {
     view.classList.toggle("active", active);
     view.setAttribute("aria-hidden", String(!active));
   });
+  if (!state.data) return;
   if (tab === "patch") renderPatch();
   if (tab === "topology") renderTopology();
   if (tab === "apps") renderApps();
@@ -623,6 +682,11 @@ function openPort(portId, deviceId) {
   const device = state.data.physical_devices.find(item => item.id === deviceId);
   const port = device?.ports.find(item => item.id === portId);
   if (!device || !port) return;
+  if (!canWrite()) {
+    if (port.entity_id) openEntityDrawer(port.entity_id);
+    else toast(port.cable_id ? portLabelFor(port) : "Vrije poort · alleen een beheerder kan koppelen", "info");
+    return;
+  }
   const form = $("#port-form");
   form.reset();
   form.elements.port_id.value = port.id;
@@ -715,7 +779,7 @@ async function runSearch(term) {
         <span class="search-kind">${row.kind === "app" ? "app" : row.kind === "physical" ? "apparaat" : "device"}</span>
         <span class="search-label">${esc(row.label)}</span>
         <span class="search-sub">${esc(row.sub || "")}</span>
-        ${row.status ? statusDot(row.status) : ""}
+        ${row.status ? `<span class="search-status">${statusDot(row.status)} ${esc(statusLabel(row.status))}</span>` : ""}
       </button>`).join("") : `<div class="empty-state tiny">Niets gevonden.</div>`;
     box.classList.remove("hidden");
   } catch { box.classList.add("hidden"); }
@@ -726,6 +790,7 @@ $("#search-results").addEventListener("click", event => {
   if (!hit) return;
   $("#search-results").classList.add("hidden");
   $("#search-input").value = "";
+  $("#search-input").blur();
   switchTab(hit.dataset.hitGoto);
   if (hit.dataset.hitKind === "entity") openEntityDrawer(hit.dataset.hitId);
   else if (hit.dataset.hitKind === "physical") {
@@ -814,7 +879,7 @@ function renderApps() {
           <span class="app-body"><strong>${esc(link.name)}</strong><small>${esc(link.description || hostOf(link.url))}</small></span>
           <span class="app-state" title="${esc(link.monitor_name ? `status via ${link.monitor_name}` : "geen statusmonitor")}">${statusDot(link.status)}<span class="sr-only">status ${esc(statusLabel(link.status))}</span></span>
           </a>
-          <button type="button" class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>
+          ${canWrite() ? `<button type="button" class="icon-button app-edit" data-app-edit="${esc(link.id)}" title="Bewerken" aria-label="${esc(link.name)} bewerken">✎</button>` : ""}
         </article>`).join("")}</div>
     </section>`).join("");
 }
@@ -1020,7 +1085,13 @@ $("#endpoint-rows").addEventListener("click", event => {
 
 function openEntity(entityId=""){
   const form=$("#entity-form"),entity=entityId?state.data.entities.find(item=>item.id===entityId):null;form.reset();form.elements.entity_id.value=entityId;
+  if(entity&&entity.origin!=="manual"){
+    openEntityDrawer(entity.id);
+    toast("Dit device komt uit een databron. Gebruik Admin om het toe te wijzen, samen te voegen of te negeren.","info");
+    return;
+  }
   $("#entity-dialog-title").textContent=entity?"Device bewerken":"Device toevoegen";
+  $("#entity-delete-modal").classList.toggle("hidden",!entity);
   $("#entity-type-select").innerHTML=categoryOptions(entity?.type||"device");
   // Een kabel is preciezer dan "hangt eraan"; zit die er al, dan is dit veld
   // niet de plek om dat te wijzigen.
@@ -1043,6 +1114,7 @@ function openPhysical(deviceId=""){
   $("#physical-monitor-select").innerHTML=`<option value="">— geen statusmonitor —</option>${state.data.entities.filter(entity=>!entity.archived).map(entity=>
     `<option value="${esc(entity.id)}"${entity.id===device?.monitor_entity_id?" selected":""}>${esc(entity.name)} · ${esc(categoryLabel(entity.type))}</option>`).join("")}`;
   $("#physical-submit").textContent=device?"Wijzigingen opslaan":"Toevoegen";
+  $("#physical-delete-modal").classList.toggle("hidden",!device);
   if(device){["name","type","model","location","notes"].forEach(key=>form.elements[key].value=device[key]||"");form.elements.ports.value=new Set(device.ports.map(port=>port.number)).size;}
   $("#physical-dialog").showModal();
 }
@@ -1065,7 +1137,7 @@ function openTopologyNode(nodeId) {
   // vinden en leek de topologie een doodlopende straat.
   const source=["entity","physical"].includes(node.reference_type)&&node.reference_id;
   $("#open-topology-source").classList.toggle("hidden",!source);
-  $("#open-topology-source").textContent=node.reference_type==="physical"?"Netwerkapparaat bewerken…":"Device bewerken…";
+  $("#open-topology-source").textContent=node.reference_type==="physical"?"Netwerkapparaat beheren…":"Device beheren…";
   $("#open-topology-source").dataset.kind=node.reference_type||"";
   $("#open-topology-source").dataset.id=node.reference_id||"";
   $("#topology-node-dialog").showModal();
@@ -1126,7 +1198,7 @@ $("#topology-canvas").addEventListener("pointermove",event=>{
   if(drag){const dx=(event.clientX-drag.startX)*drag.scaleX,dy=(event.clientY-drag.startY)*drag.scaleY;drag.moved=drag.moved||Math.abs(dx)+Math.abs(dy)>4;drag.items.forEach(item=>item.group.setAttribute("transform",`translate(${item.p.x+dx} ${item.p.y+dy})`));return;}
   const group=event.target.closest("[data-node-id]"),tooltip=$("#topology-tooltip"); if(!group||state.editingTopology){tooltip.classList.add("hidden");return;}
   const node=state.data.topology.nodes.find(item=>item.id===group.dataset.nodeId);if(!node)return;const m=node.metrics||{};
-  tooltip.innerHTML=`<strong>${esc(node.label)}</strong><span>${esc(node.subtitle||node.node_type)}</span><span>status: ${esc(node.status||"unknown")}${node.ip_address?` · ${esc(node.ip_address)}`:""}</span>${m.cpu_percent!==undefined?`<span>cpu: ${esc(m.cpu_percent)}%</span>`:""}${m.latency_ms!==undefined?`<span>response: ${esc(m.latency_ms)} ms</span>`:""}${m.sources?.length?`<span>bron: ${esc(m.sources.join(" + "))}</span>`:""}`;
+  tooltip.innerHTML=`<strong>${esc(node.label)}</strong><span>${esc(node.subtitle||node.node_type)}</span><span>status: ${esc(statusLabel(node.status))}${node.ip_address?` · ${esc(node.ip_address)}`:""}</span>${m.cpu_percent!==undefined?`<span>cpu: ${esc(m.cpu_percent)}%</span>`:""}${m.latency_ms!==undefined?`<span>reactietijd: ${esc(m.latency_ms)} ms</span>`:""}${m.sources?.length?`<span>bron: ${esc(m.sources.join(" + "))}</span>`:""}`;
   tooltip.style.left=`${event.clientX+14}px`;tooltip.style.top=`${event.clientY+14}px`;tooltip.classList.remove("hidden");
 });
 $("#topology-canvas").addEventListener("pointerleave",()=>$("#topology-tooltip").classList.add("hidden"));
@@ -1165,6 +1237,20 @@ async function confirmDeletion(kind,id) {
   } catch(error){toast(error.message,"error");}
 }
 
+$("#entity-delete-modal").addEventListener("click",async()=>{
+  const id=$("#entity-form").elements.entity_id.value;
+  if(!id)return;
+  $("#entity-dialog").close();
+  await confirmDeletion("entity",id);
+});
+
+$("#physical-delete-modal").addEventListener("click",async()=>{
+  const id=$("#physical-form").elements.device_id.value;
+  if(!id)return;
+  $("#physical-dialog").close();
+  await confirmDeletion("physical",id);
+});
+
 document.addEventListener("click", async event => {
   const tab = event.target.closest("[data-tab]"); if (tab) switchTab(tab.dataset.tab);
   const port = event.target.closest("[data-port-id]"); if (port) openPort(port.dataset.portId, port.dataset.deviceId);
@@ -1173,7 +1259,7 @@ document.addEventListener("click", async event => {
   if (sync) {
     sync.disabled = true; sync.textContent = "Ophalen…";
     try { const result = await api(`/api/providers/${sync.dataset.providerSync}/sync`, {method:"POST"}); toast(`${result.records} records verwerkt`); await loadData(true); }
-    catch (error) { toast(error.message, "error"); } finally { sync.disabled = false; sync.textContent = "Nu ophalen"; }
+    catch (error) { toast(error.message, "error"); await loadData(true); } finally { sync.disabled = false; sync.textContent = "Nu ophalen"; }
   }
   const link = event.target.closest("[data-link-entity]");
   if (link) { state.pendingEntityId = link.dataset.linkEntity; switchTab("patch"); toast("Kies de fysieke poort voor dit device"); }
@@ -1216,7 +1302,9 @@ $("#auth-form").addEventListener("submit", async event => {
   $("#auth-error").textContent = "";
   try {
     const result = await api(state.setupRequired ? "/api/auth/setup" : "/api/auth/login", {method:"POST", body:JSON.stringify(Object.fromEntries(form))});
+    resetSessionState();
     state.csrf = result.csrf_token;
+    state.role = result.role;
     $("#username").textContent = result.username;
     $("#avatar").textContent = result.username.slice(0,1).toUpperCase();
     $("#logout-button").setAttribute("aria-label", `Uitloggen als ${result.username}`);
@@ -1225,7 +1313,7 @@ $("#auth-form").addEventListener("submit", async event => {
   } catch (error) { $("#auth-error").textContent = error.message; }
 });
 
-$("#logout-button").addEventListener("click", async () => { try { await api("/api/auth/logout", {method:"POST"}); state.csrf = null; showAuth(false); } catch(error){toast(error.message,"error");} });
+$("#logout-button").addEventListener("click", async () => { try { await api("/api/auth/logout", {method:"POST"}); resetSessionState(); showAuth(false); } catch(error){toast(error.message,"error");} });
 $("#refresh-button").addEventListener("click", () => loadData());
 $("#new-entity-button").addEventListener("click", () => openEntity());
 $("#new-physical-button").addEventListener("click", () => openPhysical());
@@ -1286,14 +1374,18 @@ $("#disconnect-port").addEventListener("click", async () => {
 });
 
 $("#provider-form").addEventListener("submit", async event => {
-  event.preventDefault(); const form = event.currentTarget;
+  event.preventDefault(); const form = event.currentTarget,result=$("#provider-test-result"),submit=form.querySelector('button[type="submit"]');
+  submit.disabled=true;
+  result.className="form-feedback";
+  result.textContent=form.elements.enabled.checked?"Configuratie en verbinding worden gecontroleerd…":"Configuratie wordt opgeslagen…";
   try {
     const config = providerConfigFromForm(form);
     const credentials = providerCredentialsFromForm(form);
     const clear_credentials = $$('[data-clear-credential]:checked', form).map(input => input.dataset.clearCredential);
     await api(`/api/providers/${form.elements.provider_id.value}`, {method:"PATCH", body:JSON.stringify({name:form.elements.name.value,enabled:form.elements.enabled.checked,poll_interval_seconds:Number(form.elements.poll_interval_seconds.value),config,credentials,clear_credentials})});
     $("#provider-dialog").close(); await loadData(true); toast("Providerconfiguratie opgeslagen");
-  } catch(error){toast(error instanceof SyntaxError ? "Configuratie bevat ongeldige JSON" : error.message,"error");}
+  } catch(error){const message=error instanceof SyntaxError ? "Configuratie bevat ongeldige JSON" : error.message;result.textContent=message;result.className="form-feedback error";toast(message,"error");}
+  finally{submit.disabled=false;}
 });
 
 $("#provider-test").addEventListener("click", async event => {
@@ -1327,6 +1419,29 @@ $("#app-settings-form").addEventListener("submit", async event => {
     applyBranding(result);
     toast("Titel opgeslagen");
   } catch(error){toast(error.message,"error");}
+});
+
+$("#user-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));
+  try{
+    await api("/api/users",{method:"POST",body:JSON.stringify(payload)});
+    form.reset();
+    await loadData(true);
+    toast(payload.role==="viewer"?"Kijkersaccount toegevoegd":"Beheerdersaccount toegevoegd");
+  }catch(error){toast(error.message,"error");}
+});
+
+$("#users-list").addEventListener("click",async event=>{
+  const button=event.target.closest("[data-user-delete]");
+  if(!button)return;
+  const user=(state.data.users||[]).find(item=>item.id===button.dataset.userDelete);
+  if(!user||!(await confirmAction({title:"Gebruiker verwijderen?",message:`${user.username} kan daarna niet meer inloggen.`,confirmLabel:"Gebruiker verwijderen",expectedText:user.username})))return;
+  try{
+    await api(`/api/users/${encodeURIComponent(user.id)}?confirm=${encodeURIComponent(user.username)}`,{method:"DELETE"});
+    await loadData(true);
+    toast("Gebruiker verwijderd");
+  }catch(error){toast(error.message,"error");}
 });
 
 $("#backup-now").addEventListener("click", async event => {
@@ -1365,10 +1480,10 @@ $("#backup-import-file").addEventListener("change",async event=>{const file=even
 
 $("#speed-indicator").addEventListener("click",()=>{switchTab("topology");setTimeout(()=>$("#speed-history-card").scrollIntoView({behavior:"smooth",block:"center"}),50);});
 $("#run-speedtest").addEventListener("click",async event=>{const button=event.currentTarget;button.disabled=true;button.textContent="Test loopt…";try{const result=await api("/api/speedtest/run",{method:"POST"});await loadData(true);toast(result.status==="success"?"Speedtest voltooid":result.error||"Speedtest is al bezig",result.status==="failed"?"error":"success");}catch(error){toast(error.message,"error");}finally{button.disabled=false;button.textContent="Nu testen";}});
-$("#speed-settings-button").addEventListener("click",()=>{const settings=state.data.speedtest.settings,form=$("#speed-form");form.elements.enabled.checked=settings.enabled;form.elements.interval_seconds.value=String(settings.interval_seconds);form.elements.server_id.value=settings.server_id||"";form.elements.interface_name.value=settings.interface_name||"";form.elements.duration_seconds.value=settings.duration_seconds;$("#speed-dialog").showModal();});
-$("#speed-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.enabled=form.elements.enabled.checked;payload.interval_seconds=Number(payload.interval_seconds);payload.duration_seconds=Number(payload.duration_seconds);payload.server_id=payload.server_id||null;payload.interface_name=payload.interface_name||null;try{await api("/api/speedtest/settings",{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Speedtestinstellingen opgeslagen");}catch(error){toast(error.message,"error");}});
+$("#speed-settings-button").addEventListener("click",()=>{const settings=state.data.speedtest.settings,form=$("#speed-form");form.elements.enabled.checked=settings.enabled;form.elements.interval_seconds.value=String(settings.interval_seconds);form.elements.server_id.value=settings.server_id||"";form.elements.interface_name.value=settings.interface_name||"";form.elements.duration_seconds.value=settings.duration_seconds;$("#internet-monitor-select").innerHTML=`<option value="">— niet gemonitord —</option>${state.data.entities.filter(entity=>!entity.archived).map(entity=>`<option value="${esc(entity.id)}"${entity.id===settings.monitor_entity_id?" selected":""}>${esc(entity.name)} · ${esc(categoryLabel(entity.type))}</option>`).join("")}`;$("#speed-dialog").showModal();});
+$("#speed-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form));payload.enabled=form.elements.enabled.checked;payload.interval_seconds=Number(payload.interval_seconds);payload.duration_seconds=Number(payload.duration_seconds);payload.server_id=payload.server_id||null;payload.interface_name=payload.interface_name||null;payload.monitor_entity_id=payload.monitor_entity_id||null;try{await api("/api/speedtest/settings",{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Internet- en speedtestinstellingen opgeslagen");}catch(error){toast(error.message,"error");}});
 
-setInterval(()=>{if(state.data&&!document.hidden)pollSummary();},30000);
+setInterval(()=>{if(state.csrf&&state.data&&!document.hidden&&!$("#app-shell").classList.contains("hidden"))pollSummary();},30000);
 
 initialize();
 
@@ -1463,8 +1578,9 @@ function renderWizardProviders() {
     // Config vóór credentials: een tokengeheim invullen heeft geen zin zolang
     // de gebruiker en het token-ID ernaast nog op de sjabloonwaarde staan.
     const configFields = provider.config_fields || [];
-    return `<article class="provider-card" data-wizard-provider="${esc(id)}">
-      <div class="provider-head"><div class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><div><div class="provider-name">${esc(provider.name)}</div><div class="provider-type">${esc(provider.type)}</div></div></div></div>
+    return `<details class="provider-card wizard-provider-card" data-wizard-provider="${esc(id)}"${provider.enabled?" open":""}>
+      <summary class="provider-head"><span class="data-main"><span class="provider-icon">${providerIcon(provider.type)}</span><span><span class="provider-name">${esc(provider.name)}</span><span class="provider-type">${esc(PROVIDER_TYPE_LABELS[provider.type]||"Netwerkgegevens")}</span></span></span><span class="provider-state">${provider.enabled?"al gekoppeld":"optioneel"}</span></summary>
+      <div class="wizard-provider-body stack">
       <label class="tiny">Basis-URL<input data-wizard-url placeholder="https://host:poort" value="${esc(provider.config.base_url || (provider.config.endpoints?.[0]?.url) || "")}"></label>
       ${configFields.map(field => `<label class="tiny">${esc(field.label)}<input data-wizard-config="${esc(field.key)}" placeholder="${esc(field.placeholder || "")}" value="${esc(provider.config[field.key] ?? "")}"></label>`).join("")}
       ${provider.type === "glances" ? `<label class="tiny">Device dat hier draait<select data-wizard-endpoint-entity>${
@@ -1477,7 +1593,8 @@ function renderWizardProviders() {
         <button type="button" class="button primary" data-wizard-save="${esc(id)}" disabled>Opslaan en ophalen</button>
       </div>
       <p class="tiny wizard-result"></p>
-    </article>`;
+      </div>
+    </details>`;
   }).join("");
 }
 
@@ -1628,6 +1745,14 @@ $("#wizard-dialog").addEventListener("click", event => {
   const save = event.target.closest("[data-wizard-save]"); if (save) wizardSaveProvider(save.closest("[data-wizard-provider]"));
   const goto = event.target.closest("[data-goto]");
   if (goto) { event.preventDefault(); closeWizard().then(() => switchTab(goto.dataset.goto)); }
+});
+
+$("#wizard-dialog").addEventListener("input",event=>{
+  const card=event.target.closest("[data-wizard-provider]");
+  if(!card)return;
+  const save=$("[data-wizard-save]",card),result=$(".wizard-result",card);
+  if(save)save.disabled=true;
+  if(result){result.textContent="Test de gewijzigde gegevens opnieuw vóór opslaan.";result.className="tiny wizard-result";}
 });
 
 // Toon/verberg de vervolgkeuzes bij "samenvoegen" en "overnemen". De plek mag
@@ -1781,7 +1906,7 @@ async function openEntityDrawer(entityId) {
   if (!entity) return;
   const port = findPortByEntity(entityId);
   $("#entity-drawer-title").textContent = entity.name;
-  $("#entity-drawer-sub").innerHTML = `${statusDot(entity.status)} ${esc(entity.status)} · ${esc(entity.type)} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}`;
+  $("#entity-drawer-sub").innerHTML = `${statusDot(entity.status)} ${esc(statusLabel(entity.status))} · ${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "gevonden via databron")}`;
   $("#entity-drawer-facts").innerHTML = [
     ["Adres", entity.ip_address || entity.hostname || "—"], ["MAC", entity.mac_address || "—"],
     ["Vendor", entity.vendor || "—"], ["Laatst gezien", formatTime(entity.last_seen_at)],
