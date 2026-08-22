@@ -650,3 +650,40 @@ def test_portable_restore_rolls_back_database_when_key_replace_fails(
         database.restore_backup(bundle, SECRET_KEY_PATH)
 
     assert database.fetch_one("SELECT value FROM app_meta WHERE key='app_title'")["value"] == "Actieve toestand"
+
+
+def test_config_export_import_round_trips_app_links() -> None:
+    """App-tegels horen bij de config: export mag ze niet stilzwijgend laten vallen.
+
+    app_links stond niet in CONFIG_TABLES, dus een configexport verloor alle
+    apps en een import kon ze niet terugzetten.
+    """
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        monitor_id = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "App-monitor", "type": "service"},
+        ).json()["id"]
+        created = client.post(
+            "/api/app-links", headers=headers,
+            json={"name": "Grafana", "url": "https://grafana.home.arpa",
+                  "group_name": "Monitoring", "monitor_entity_id": monitor_id},
+        )
+        assert created.status_code == 200, created.text
+
+        exported = client.get("/api/config/export").json()
+        assert "app_links" in exported["tables"], "app_links ontbreekt in de export"
+        app_row = next(a for a in exported["tables"]["app_links"] if a["name"] == "Grafana")
+        assert app_row["monitor_entity_id"] == monitor_id
+        assert app_row["url"] == "https://grafana.home.arpa"
+
+        # Verwijder de app en zet hem terug via een import van de export.
+        client.request("DELETE", f"/api/app-links/{app_row['id']}", headers=headers)
+        assert not database.fetch_one("SELECT 1 FROM app_links WHERE id=?", (app_row["id"],))
+        imported = client.post("/api/config/import", headers=headers, json=exported)
+        assert imported.status_code == 200, imported.text
+
+    restored = database.fetch_one("SELECT name,group_name,monitor_entity_id FROM app_links WHERE id=?", (app_row["id"],))
+    assert restored is not None
+    assert restored["name"] == "Grafana"
+    assert restored["monitor_entity_id"] == monitor_id

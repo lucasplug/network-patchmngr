@@ -1826,7 +1826,7 @@ def backup_restore(name: str, confirm: str, auth: AuthContext = Depends(write_au
 
 CONFIG_TABLES = (
     "providers", "entities", "physical_devices", "ports", "cables",
-    "topology_nodes", "topology_relations", "dns_records", "speedtest_settings",
+    "app_links", "topology_nodes", "topology_relations", "dns_records", "speedtest_settings",
 )
 
 
