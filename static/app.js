@@ -572,7 +572,6 @@ function renderAdmin() {
   // Een poortloze uplink telt ook als geplaatst; anders blijft een wifi-client
   // eeuwig in de "nog te koppelen"-lijst staan.
   const monitoring = new Set(state.data.physical_devices.map(device => device.monitor_entity_id).filter(Boolean));
-  const unlinked = state.data.entities.filter(entity => entity.origin === "discovered" && !entity.ignored && !entity.archived && !assigned.has(entity.id) && !entity.uplink_device_id && !monitoring.has(entity.id));
   const uplinked = state.data.entities.filter(entity => entity.uplink_device_id && !entity.ignored && !entity.archived);
   const deviceName = id => state.data.physical_devices.find(device => device.id === id)?.name || "onbekend apparaat";
   const inactive = state.data.entities.filter(entity => entity.origin === "discovered" && (entity.ignored || entity.archived));
@@ -613,10 +612,17 @@ function renderAdmin() {
   $("#primary-count").textContent = `${anchors.length} hoofdentiteiten`;
   $("#primary-entities-list").innerHTML = anchors.length ? anchors.map(entity => {
     const sources = recordsByEntity[entity.id] || [];
+    const placed = assigned.has(entity.id) || Boolean(entity.uplink_device_id) || monitoring.has(entity.id);
     const sourceHtml = sources.length
       ? `<div class="source-list">${sources.map(source => `<div class="source-item"><span class="source-dot">${statusDot(entity.status)}</span><div class="source-main"><strong>${esc(source.provider_name)}</strong><span>${esc(source.kind)} · ${esc(source.external_id)}</span></div></div>`).join("")}</div>`
       : `<p class="muted tiny source-empty">Nog geen databronnen gekoppeld.</p>`;
-    return `<div class="data-row primary-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.ip_address || entity.hostname || "—")}</span></div></div><div><span class="data-cell-label">Databronnen</span><br>${sources.length}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-entity-open="${entity.id}">Openen</button></div>${sourceHtml}</div>`;
+    const actions = [
+      `<button type="button" class="button" data-entity-open="${entity.id}">Openen</button>`,
+      `<button type="button" class="button" data-rename-entity="${entity.id}">Naam</button>`,
+      placed ? "" : `<button type="button" class="button" data-link-entity="${entity.id}">Poort</button>`,
+      entity.origin !== "manual" ? `<button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button>` : "",
+    ].join("");
+    return `<div class="data-row primary-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.ip_address || entity.hostname || "—")}</span></div></div><div><span class="data-cell-label">Databronnen</span><br>${sources.length}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions">${actions}</div>${sourceHtml}</div>`;
   }).join("") : `<div class="empty-state">Nog geen hoofdentiteiten.</div>`;
   $("#loose-source-count").textContent = `${looseSources.length} losse bronnen`;
   $("#loose-sources-list").innerHTML = looseSources.length ? looseSources.map(entity => {
@@ -627,14 +633,6 @@ function renderAdmin() {
       : `<button type="button" class="button" data-parent-entity="${entity.id}">Koppel aan…</button>`;
     return `<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(source)} · ${esc(categoryLabel(entity.type))}</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions">${action}</div></div>`;
   }).join("") : `<div class="empty-state">Alle databronnen hangen onder een hoofdentiteit.</div>`;
-  $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
-  $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => {
-    const suggestion = suggestions[entity.id];
-    const suggestionHtml = suggestion ? `
-      <div class="link-suggestion" role="note"><span class="link-suggestion-text">Waarschijnlijk dezelfde als <strong>${esc(suggestion.name)}</strong>${suggestion.ip_address ? ` · ${esc(suggestion.ip_address)}` : ""}</span><div class="link-suggestion-actions"><button type="button" class="button micro primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel als databron</button><button type="button" class="button micro" data-dismiss-suggestion="${entity.id}" data-dismiss-primary="${suggestion.id}">Los laten</button></div></div>` : "";
-    return `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div>${suggestionHtml}</div>`;
-  }).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#uplink-count").textContent = `${uplinked.length} gekoppeld`;
   $("#uplinks-list").innerHTML = uplinked.length ? uplinked.map(entity => `
     <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button type="button" class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
@@ -1318,6 +1316,10 @@ document.addEventListener("click", async event => {
   const physicalDelete=event.target.closest("[data-physical-delete]");if(physicalDelete)confirmDeletion("physical",physicalDelete.dataset.physicalDelete);
   const entityEdit=event.target.closest("[data-entity-edit]");if(entityEdit)openEntity(entityEdit.dataset.entityEdit);
   const entityOpen=event.target.closest("[data-entity-open]");if(entityOpen)openEntityDrawer(entityOpen.dataset.entityOpen);
+  const rename=event.target.closest("[data-rename-entity]");
+  if(rename){const id=rename.dataset.renameEntity,ent=state.data.entities.find(item=>item.id===id);
+    if(ent&&ent.origin!=="manual"){const naam=prompt("Naam voor dit apparaat:",ent.name||"");if(naam&&naam.trim()){try{await api(`/api/entities/${encodeURIComponent(id)}/promote`,{method:"POST",body:JSON.stringify({name:naam.trim()})});await loadData(true);toast("Apparaat overgenomen en benoemd");}catch(error){toast(error.message,"error");}}}
+    else openEntity(id);}
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
   const parent=event.target.closest("[data-parent-entity]");if(parent)openParent(parent.dataset.parentEntity);
