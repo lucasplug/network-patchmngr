@@ -585,13 +585,20 @@ function renderAdmin() {
   for (const record of (state.data.provider_records || [])) {
     if (record.entity_id) (recordsByEntity[record.entity_id] ||= []).push(record);
   }
+  // Een entiteit die zelf ouder is (containers/VM's hangen eronder) is een
+  // hoofdentiteit, ook zonder MAC — denk aan Docker-runtime.
+  const parentIds = new Set(state.data.entities.map(entity => entity.parent_id).filter(Boolean));
   const isAnchor = entity => !entity.ignored && !entity.archived
-    && (entity.origin === "manual" || Boolean(entity.mac_address)
+    && (entity.origin === "manual" || Boolean(entity.mac_address) || parentIds.has(entity.id)
         || (recordsByEntity[entity.id] || []).some(record => record.kind === "network_device"));
   const anchors = state.data.entities.filter(isAnchor)
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  // Losse databron = een discovery die nergens onder hangt (geen ouder) én zelf
+  // geen hoofdentiteit is. Iets dat al onder een host hangt (een container onder
+  // Docker-runtime, een NPM-service onder zijn backend) telt dus niet mee.
   const looseSources = state.data.entities.filter(entity =>
-    entity.origin === "discovered" && !entity.ignored && !entity.archived && !isAnchor(entity));
+    entity.origin === "discovered" && !entity.ignored && !entity.archived
+    && !isAnchor(entity) && !entity.parent_id);
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
