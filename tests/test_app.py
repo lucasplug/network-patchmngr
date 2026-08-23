@@ -327,6 +327,67 @@ def test_inventory_edit_discovery_mapping_merge_and_audit() -> None:
         assert client.get("/api/bootstrap").json()["audit_log"]
 
 
+def test_same_ip_suggestion_attach_and_sources() -> None:
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        # ARP/DHCP-hoofdentiteit (kale IP-naam) en een losse Proxmox-bron op hetzelfde IP.
+        primary_id = providers._store_record(
+            "dhcp-arp", "arp:192.168.100.80", "network_device", {"ip": "192.168.100.80"},
+            name="192.168.100.80", entity_type="device", status="up",
+            ip_address="192.168.100.80", mac_address="aa:bb:cc:dd:ee:80",
+        )
+        source_id = providers._store_record(
+            "proxmox", "qemu:pve:100", "qemu", {"vmid": 100},
+            name="Plugmox", entity_type="host", status="up", ip_address="192.168.100.80",
+        )
+        assert source_id != primary_id
+
+        # De losse bron krijgt een voorstel richting de ARP-hoofdentiteit; de ARP
+        # entiteit zelf krijgt er géén (eenrichting).
+        discoveries = {row["id"]: row for row in client.get("/api/discoveries").json()}
+        assert discoveries[source_id]["suggested_primary"]["id"] == primary_id
+        assert discoveries[primary_id]["suggested_primary"] is None
+
+        # 1-klik koppelen: bron verhuist onder de hoofdentiteit en verdwijnt; de
+        # hoofdentiteit erft de leesbare naam omdat hij alleen een IP als naam had.
+        attached = client.post(
+            f"/api/entities/{primary_id}/attach-source", headers=headers,
+            json={"source_entity_id": source_id},
+        )
+        assert attached.status_code == 200, attached.text
+        assert database.fetch_one("SELECT id FROM entities WHERE id=?", (source_id,)) is None
+        primary = database.fetch_one("SELECT * FROM entities WHERE id=?", (primary_id,))
+        assert primary["name"] == "Plugmox"
+        assert primary["type"] == "host"
+
+        # Beide databronnen hangen nu onder de hoofdentiteit.
+        sources = client.get(f"/api/entities/{primary_id}/sources").json()
+        kinds = {record["kind"] for record in sources["provider_records"]}
+        assert {"network_device", "qemu"} <= kinds
+
+
+def test_dismissed_suggestion_does_not_return() -> None:
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        primary_id = providers._store_record(
+            "dhcp-arp", "arp:192.168.100.81", "network_device", {"ip": "192.168.100.81"},
+            name="192.168.100.81", entity_type="device", ip_address="192.168.100.81",
+            mac_address="aa:bb:cc:dd:ee:81",
+        )
+        source_id = providers._store_record(
+            "proxmox", "qemu:pve:101", "qemu", {"vmid": 101},
+            name="Los ding", entity_type="host", ip_address="192.168.100.81",
+        )
+        assert client.get("/api/discoveries").json()
+        dismissed = client.post(
+            f"/api/entities/{source_id}/dismiss-suggestion", headers=headers,
+            json={"primary_entity_id": primary_id},
+        )
+        assert dismissed.status_code == 200, dismissed.text
+        rows = {row["id"]: row for row in client.get("/api/discoveries").json()}
+        assert rows[source_id]["suggested_primary"] is None
+
+
 def test_topology_grouping_delete_and_undo() -> None:
     with TestClient(app) as client:
         csrf = client.post(

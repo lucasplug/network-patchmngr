@@ -588,8 +588,14 @@ function renderAdmin() {
     </article>`;
   }).join("");
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
-  $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
+  const suggestions = state.data.link_suggestions || {};
+  $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => {
+    const suggestion = suggestions[entity.id];
+    const suggestionHtml = suggestion ? `
+      <div class="link-suggestion" role="note"><span class="link-suggestion-text">Waarschijnlijk dezelfde als <strong>${esc(suggestion.name)}</strong>${suggestion.ip_address ? ` · ${esc(suggestion.ip_address)}` : ""}</span><div class="link-suggestion-actions"><button type="button" class="button micro primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel als databron</button><button type="button" class="button micro" data-dismiss-suggestion="${entity.id}" data-dismiss-primary="${suggestion.id}">Los laten</button></div></div>` : "";
+    return `
+    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div>${suggestionHtml}</div>`;
+  }).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#uplink-count").textContent = `${uplinked.length} gekoppeld`;
   $("#uplinks-list").innerHTML = uplinked.length ? uplinked.map(entity => `
     <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button type="button" class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
@@ -1293,6 +1299,12 @@ document.addEventListener("click", async event => {
   if(uplinkClear){const id=uplinkClear.dataset.uplinkClear;try{await api(`/api/entities/${encodeURIComponent(id)}/uplink`,{method:"PUT",body:JSON.stringify({physical_device_id:null})});await loadData(true);toast("Losgekoppeld");}catch(error){toast(error.message,"error");}}
   const discovery=event.target.closest("[data-discovery-state]");
   if(discovery){const mode=discovery.dataset.discoveryState,payload=mode==="ignore"?{ignored:true,archived:false}:mode==="archive"?{ignored:false,archived:true}:{ignored:false,archived:false};try{await api(`/api/entities/${discovery.dataset.entityId}/discovery-state`,{method:"PATCH",body:JSON.stringify(payload)});await loadData(true);toast(mode==="restore"?"Discovery hersteld":mode==="ignore"?"Discovery genegeerd":"Discovery gearchiveerd");}catch(error){toast(error.message,"error");}}
+  const attach=event.target.closest("[data-attach-source]");
+  if(attach){try{await api(`/api/entities/${encodeURIComponent(attach.dataset.attachPrimary)}/attach-source`,{method:"POST",body:JSON.stringify({source_entity_id:attach.dataset.attachSource})});await loadData(true);toast("Databron gekoppeld aan hoofdentiteit");}catch(error){toast(error.message,"error");}}
+  const dismiss=event.target.closest("[data-dismiss-suggestion]");
+  if(dismiss){try{await api(`/api/entities/${encodeURIComponent(dismiss.dataset.dismissSuggestion)}/dismiss-suggestion`,{method:"POST",body:JSON.stringify({primary_entity_id:dismiss.dataset.dismissPrimary})});await loadData(true);toast("Voorstel losgelaten");}catch(error){toast(error.message,"error");}}
+  const detach=event.target.closest("[data-detach-record]");
+  if(detach){try{await api(`/api/provider-records/${encodeURIComponent(detach.dataset.detachRecord)}/mapping`,{method:"PATCH",body:JSON.stringify({entity_id:null})});await loadData(true);if(state.openEntityId)renderEntitySources(state.openEntityId);toast("Databron ontkoppeld");}catch(error){toast(error.message,"error");}}
   const restore=event.target.closest("[data-backup-restore]");if(restore){const name=restore.dataset.backupRestore;if(await confirmAction({title:"Back-up terugzetten?",message:`${name} wordt teruggezet. De huidige database wordt eerst automatisch veiliggesteld; je sessie kan daarna verlopen.`,confirmLabel:"Back-up herstellen"})){try{await api(`/api/backups/${encodeURIComponent(name)}/restore?confirm=${encodeURIComponent(name)}`,{method:"POST"});toast("Back-up hersteld; app wordt herladen");setTimeout(()=>location.reload(),800);}catch(error){toast(error.message,"error");}}}
 });
 
@@ -1901,6 +1913,35 @@ function uptimeBar(days) {
   }).join("")}</div>`;
 }
 
+async function renderEntitySources(entityId) {
+  // De databronnen onder deze hoofdentiteit: providerrecords, AdGuard-rewrites,
+  // NPM-proxyhosts en of hij ergens de statusmonitor is. Alleen voor beheerders;
+  // een kijker mag dit endpoint niet en ziet het blok niet.
+  const container = $("#entity-drawer-sources");
+  if (!container) return;
+  if (state.role !== "admin") { container.innerHTML = ""; return; }
+  container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span><p class="muted tiny">laden…</p>`;
+  try {
+    const data = await api(`/api/entities/${encodeURIComponent(entityId)}/sources`);
+    const items = [];
+    for (const record of data.provider_records) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot(record.status)}</span><div class="source-main"><strong>${esc(record.provider_name)}</strong><span>${esc(record.kind)} · ${esc(record.external_id)}${record.last_seen_at ? ` · ${esc(formatTime(record.last_seen_at))}` : ""}</span></div><button type="button" class="button micro" data-detach-record="${esc(record.id)}">Ontkoppel</button></div>`);
+    }
+    for (const dns of data.dns_records) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>DNS · ${esc(dns.source)}</strong><span>${esc(dns.name)} → ${esc(dns.value)}</span></div></div>`);
+    }
+    for (const proxy of data.proxy_hosts) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>Proxy · ${esc(proxy.source)}</strong><span>${esc(proxy.forward_host)}:${esc(proxy.forward_port)}</span></div></div>`);
+    }
+    for (const device of data.monitor_for) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>Statusmonitor</strong><span>${esc(device.name)}</span></div></div>`);
+    }
+    container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span>${items.length ? `<div class="source-list">${items.join("")}</div>` : `<p class="muted tiny">Nog geen databronnen. Koppel er een via ‘Expliciete bronkoppelingen’ bij Databronnen.</p>`}`;
+  } catch (error) {
+    container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span><p class="muted tiny">${esc(error.message)}</p>`;
+  }
+}
+
 async function openEntityDrawer(entityId) {
   const entity = state.data.entities.find(item => item.id === entityId);
   if (!entity) return;
@@ -1914,6 +1955,8 @@ async function openEntityDrawer(entityId) {
   $("#entity-drawer-cable").innerHTML = port
     ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button type="button" class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
+  state.openEntityId = entityId;
+  renderEntitySources(entityId);
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
   const drawer = $("#entity-drawer");
   entityDrawerReturnFocus = document.activeElement;

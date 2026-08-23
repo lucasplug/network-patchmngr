@@ -357,6 +357,18 @@ CREATE TABLE IF NOT EXISTS speedtest_runs (
   started_at TEXT NOT NULL,
   completed_at TEXT
 );
+
+-- Een afgewezen koppelvoorstel: "deze bron is NIET hetzelfde apparaat als die
+-- hoofdentiteit". Zonder dit zou dezelfde IP-suggestie na elke sync terugkomen.
+-- Verdwijnt vanzelf zodra een van beide entiteiten weg is (bron wordt bij
+-- koppelen verwijderd), zodat er geen wees-rijen blijven hangen.
+CREATE TABLE IF NOT EXISTS link_dismissals (
+  id TEXT PRIMARY KEY,
+  source_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  primary_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  UNIQUE(source_entity_id, primary_entity_id)
+);
 """
 
 
