@@ -146,6 +146,17 @@ def with_discovery():
     return discovery("Gevonden-NAS")
 
 
+@pytest.fixture
+def with_parented_discovery():
+    """Een hoofdentiteit met een actieve, losse databron als kind."""
+    parent_id = discovery("Hoofdapparaat")
+    child_id = providers._store_record(
+        "uptime-kuma", "monitor:child", "monitor", {"name": "Kindmonitor"},
+        name="Kindmonitor", entity_type="service", status="up", parent_id=parent_id,
+    )
+    return parent_id, child_id
+
+
 def hidden(page: Page, selector: str) -> bool:
     return bool(page.locator(selector).evaluate("element => element.classList.contains('hidden')"))
 
@@ -417,6 +428,10 @@ def test_navigation_and_logout_explain_their_current_action(page: Page) -> None:
 
 
 def test_viewer_has_a_clear_read_only_interface_and_can_logout(page: Page) -> None:
+    page.click("#new-entity-button")
+    page.fill('#entity-form input[name="name"]', "Leesbaar apparaat")
+    page.click('#entity-form button[type="submit"]')
+    settle(page)
     tab(page, "admin")
     page.fill('#user-form input[name="username"]', "sanne")
     page.select_option('#user-form select[name="role"]', "viewer")
@@ -439,6 +454,11 @@ def test_viewer_has_a_clear_read_only_interface_and_can_logout(page: Page) -> No
     expect(page.locator("#new-physical-button")).to_be_hidden()
     expect(page.locator("#topology-edit")).to_be_hidden()
     expect(page.locator('[data-tab="patch"]')).to_have_attribute("aria-current", "page")
+    page.locator('[data-entity-open]').filter(has_text="Leesbaar apparaat").click()
+    expect(page.locator("#entity-drawer-parent")).to_be_visible()
+    expect(page.locator("#entity-drawer-parent [data-parent-entity]")).to_have_count(0)
+    expect(page.locator("#entity-drawer-parent [data-parent-clear]")).to_have_count(0)
+    page.keyboard.press("Escape")
     page.click("#logout-button")
     expect(page.locator("#auth-view")).to_be_visible()
 
@@ -601,7 +621,7 @@ def test_manual_topology_relation_is_keyboard_accessible_and_deletable(page: Pag
     assert page.locator("#topology-canvas .relation-hit.manual").count() == before - 1
 
 
-def test_all_main_views_fit_a_phone_viewport(page: Page) -> None:
+def test_all_main_views_fit_a_phone_viewport(with_discovery, page: Page) -> None:
     """Elke hoofdfunctie blijft op 390px binnen de pagina zelf.
 
     De topologiekaart mag in zijn eigen vlak scrollen; de hele pagina niet.
@@ -616,6 +636,14 @@ def test_all_main_views_fit_a_phone_viewport(page: Page) -> None:
         })""")
         assert dimensions["document"] <= dimensions["viewport"], f"{name} maakt de pagina te breed: {dimensions}"
         assert dimensions["body"] <= dimensions["viewport"], f"{name} maakt de body te breed: {dimensions}"
+
+
+def test_child_source_stays_manageable_when_parent_is_archived(with_parented_discovery, page: Page) -> None:
+    parent_id, _child_id = with_parented_discovery
+    tab(page, "admin")
+    page.locator(f'[data-discovery-state="archive"][data-entity-id="{parent_id}"]').click()
+    settle(page)
+    expect(page.locator("#loose-sources-list")).to_contain_text("Kindmonitor")
 
 
 def test_admin_primary_actions_remain_readable_on_a_phone(page: Page) -> None:
