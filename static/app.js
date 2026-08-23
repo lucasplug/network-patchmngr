@@ -1163,6 +1163,13 @@ function openPhysical(deviceId=""){
 }
 
 function openMerge(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#merge-form");form.elements.source_entity_id.value=entityId;$("#merge-title").textContent=`${source?.name||"Discovery"} samenvoegen`;form.elements.target_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("");$("#merge-dialog").showModal();}
+function suggestName(entity){
+  // Slimme voorzet voor een naam, offline: eerst een echte hostname, anders de
+  // vendor uit de OUI-lookup met het laatste IP-octet, anders wat er staat.
+  if(entity.hostname && entity.hostname!==entity.ip_address) return entity.hostname;
+  if(entity.vendor){const last=(entity.ip_address||"").split(".").pop();return last?`${entity.vendor} (.${last})`:entity.vendor;}
+  return entity.name||"";
+}
 function openParent(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#parent-form");form.elements.source_entity_id.value=entityId;$("#parent-title").textContent=`${source?.name||"Databron"} onder hoofdentiteit hangen`;form.elements.parent_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived&&!item.ignored).sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(categoryLabel(item.type))}${item.ip_address?` · ${esc(item.ip_address)}`:""}</option>`).join("");$("#parent-dialog").showModal();}
 function openMapping(recordId){const record=state.data.provider_records.find(item=>item.id===recordId),form=$("#mapping-form");form.elements.record_id.value=recordId;form.elements.entity_id.innerHTML=`<option value="">Niet gekoppeld</option>${state.data.entities.filter(item=>!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("")}`;form.elements.entity_id.value=record?.entity_id||"";$("#mapping-dialog").showModal();}
 
@@ -1318,11 +1325,13 @@ document.addEventListener("click", async event => {
   const entityOpen=event.target.closest("[data-entity-open]");if(entityOpen)openEntityDrawer(entityOpen.dataset.entityOpen);
   const rename=event.target.closest("[data-rename-entity]");
   if(rename){const id=rename.dataset.renameEntity,ent=state.data.entities.find(item=>item.id===id);
-    if(ent&&ent.origin!=="manual"){const naam=prompt("Naam voor dit apparaat:",ent.name||"");if(naam&&naam.trim()){try{await api(`/api/entities/${encodeURIComponent(id)}/promote`,{method:"POST",body:JSON.stringify({name:naam.trim()})});await loadData(true);toast("Apparaat overgenomen en benoemd");}catch(error){toast(error.message,"error");}}}
+    if(ent&&ent.origin!=="manual"){const naam=prompt("Naam voor dit apparaat:",suggestName(ent));if(naam&&naam.trim()){try{await api(`/api/entities/${encodeURIComponent(id)}/promote`,{method:"POST",body:JSON.stringify({name:naam.trim()})});await loadData(true);toast("Apparaat overgenomen en benoemd");}catch(error){toast(error.message,"error");}}}
     else openEntity(id);}
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
   const parent=event.target.closest("[data-parent-entity]");if(parent)openParent(parent.dataset.parentEntity);
+  const parentClear=event.target.closest("[data-parent-clear]");
+  if(parentClear){const id=parentClear.dataset.parentClear;try{await api(`/api/entities/${encodeURIComponent(id)}/parent`,{method:"PUT",body:JSON.stringify({parent_entity_id:null})});await loadData(true);if(state.openEntityId===id)openEntityDrawer(id);toast("Losgekoppeld van hoofdentiteit");}catch(error){toast(error.message,"error");}}
   const mapping=event.target.closest("[data-mapping-edit]");if(mapping)openMapping(mapping.dataset.mappingEdit);
   const providerDelete=event.target.closest("[data-provider-delete]");
   if(providerDelete){
@@ -1507,7 +1516,7 @@ $("#backup-now").addEventListener("click", async event => {
 });
 
 $("#merge-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),source=payload.source_entity_id;delete payload.source_entity_id;try{await api(`/api/entities/${source}/merge`,{method:"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Discovery samengevoegd");}catch(error){toast(error.message,"error");}});
-$("#parent-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,source=form.elements.source_entity_id.value,parentId=form.elements.parent_entity_id.value;try{await api(`/api/entities/${encodeURIComponent(source)}/parent`,{method:"PUT",body:JSON.stringify({parent_entity_id:parentId})});form.closest("dialog").close();await loadData(true);toast("Databron als kind gekoppeld");}catch(error){toast(error.message,"error");}});
+$("#parent-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,source=form.elements.source_entity_id.value,parentId=form.elements.parent_entity_id.value;try{await api(`/api/entities/${encodeURIComponent(source)}/parent`,{method:"PUT",body:JSON.stringify({parent_entity_id:parentId})});form.closest("dialog").close();await loadData(true);if(state.openEntityId===source)openEntityDrawer(source);toast("Als kind gekoppeld");}catch(error){toast(error.message,"error");}});
 $("#mapping-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),recordId=payload.record_id;delete payload.record_id;payload.entity_id=payload.entity_id||null;try{await api(`/api/provider-records/${recordId}/mapping`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Bronkoppeling opgeslagen");}catch(error){toast(error.message,"error");}});
 
 $("#topology-edit").addEventListener("click",()=>{state.editingTopology=true;state.selectedNodes.clear();$("#topology-editbar").classList.remove("hidden");$("#topology-edit").classList.add("hidden");renderTopology();});
@@ -2000,6 +2009,8 @@ async function openEntityDrawer(entityId) {
   $("#entity-drawer-cable").innerHTML = port
     ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button type="button" class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
+  const parentEntity = entity.parent_id ? state.data.entities.find(item => item.id === entity.parent_id) : null;
+  $("#entity-drawer-parent").innerHTML = `<span class="data-cell-label">Hangt onder</span><br>${parentEntity ? esc(parentEntity.name) : '<span class="muted tiny">geen hoofdentiteit</span>'} · <button type="button" class="button micro" data-parent-entity="${esc(entityId)}">Kies…</button>${entity.parent_id ? ` <button type="button" class="button micro" data-parent-clear="${esc(entityId)}">Loskoppelen</button>` : ""}`;
   state.openEntityId = entityId;
   renderEntitySources(entityId);
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
