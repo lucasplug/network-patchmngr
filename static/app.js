@@ -576,6 +576,22 @@ function renderAdmin() {
   const uplinked = state.data.entities.filter(entity => entity.uplink_device_id && !entity.ignored && !entity.archived);
   const deviceName = id => state.data.physical_devices.find(device => device.id === id)?.name || "onbekend apparaat";
   const inactive = state.data.entities.filter(entity => entity.origin === "discovered" && (entity.ignored || entity.archived));
+  const suggestions = state.data.link_suggestions || {};
+  // Hoofdentiteiten (anchors) versus losse databronnen. Een anchor is een echt
+  // apparaat: handmatig aangemaakt, met een MAC, of gezien door ARP/DHCP
+  // (kind='network_device'). Een losse databron is een discovery zonder eigen
+  // ARP-verankering (een Proxmox-VM, een Uptime-monitor) die eronder hoort.
+  const recordsByEntity = {};
+  for (const record of (state.data.provider_records || [])) {
+    if (record.entity_id) (recordsByEntity[record.entity_id] ||= []).push(record);
+  }
+  const isAnchor = entity => !entity.ignored && !entity.archived
+    && (entity.origin === "manual" || Boolean(entity.mac_address)
+        || (recordsByEntity[entity.id] || []).some(record => record.kind === "network_device"));
+  const anchors = state.data.entities.filter(isAnchor)
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const looseSources = state.data.entities.filter(entity =>
+    entity.origin === "discovered" && !entity.ignored && !entity.archived && !isAnchor(entity));
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
@@ -587,8 +603,24 @@ function renderAdmin() {
           ? `<button type="button" class="button danger" data-provider-delete="${provider.id}">Verwijder</button>` : ""}</div>
     </article>`;
   }).join("");
+  $("#primary-count").textContent = `${anchors.length} hoofdentiteiten`;
+  $("#primary-entities-list").innerHTML = anchors.length ? anchors.map(entity => {
+    const sources = recordsByEntity[entity.id] || [];
+    const sourceHtml = sources.length
+      ? `<div class="source-list">${sources.map(source => `<div class="source-item"><span class="source-dot">${statusDot(entity.status)}</span><div class="source-main"><strong>${esc(source.provider_name)}</strong><span>${esc(source.kind)} · ${esc(source.external_id)}</span></div></div>`).join("")}</div>`
+      : `<p class="muted tiny source-empty">Nog geen databronnen gekoppeld.</p>`;
+    return `<div class="data-row primary-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.ip_address || entity.hostname || "—")}</span></div></div><div><span class="data-cell-label">Databronnen</span><br>${sources.length}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-entity-open="${entity.id}">Openen</button></div>${sourceHtml}</div>`;
+  }).join("") : `<div class="empty-state">Nog geen hoofdentiteiten.</div>`;
+  $("#loose-source-count").textContent = `${looseSources.length} losse bronnen`;
+  $("#loose-sources-list").innerHTML = looseSources.length ? looseSources.map(entity => {
+    const suggestion = suggestions[entity.id];
+    const source = (recordsByEntity[entity.id] || []).map(record => record.provider_name).join(", ") || "onbekende bron";
+    const action = suggestion
+      ? `<button type="button" class="button primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel aan ${esc(suggestion.name)}</button>`
+      : `<button type="button" class="button" data-merge-entity="${entity.id}">Koppel aan…</button>`;
+    return `<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(source)} · ${esc(categoryLabel(entity.type))}</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions">${action}</div></div>`;
+  }).join("") : `<div class="empty-state">Alle databronnen hangen onder een hoofdentiteit.</div>`;
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
-  const suggestions = state.data.link_suggestions || {};
   $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => {
     const suggestion = suggestions[entity.id];
     const suggestionHtml = suggestion ? `
@@ -1277,6 +1309,7 @@ document.addEventListener("click", async event => {
   const entityDelete=event.target.closest("[data-entity-delete]");if(entityDelete)confirmDeletion("entity",entityDelete.dataset.entityDelete);
   const physicalDelete=event.target.closest("[data-physical-delete]");if(physicalDelete)confirmDeletion("physical",physicalDelete.dataset.physicalDelete);
   const entityEdit=event.target.closest("[data-entity-edit]");if(entityEdit)openEntity(entityEdit.dataset.entityEdit);
+  const entityOpen=event.target.closest("[data-entity-open]");if(entityOpen)openEntityDrawer(entityOpen.dataset.entityOpen);
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
   const mapping=event.target.closest("[data-mapping-edit]");if(mapping)openMapping(mapping.dataset.mappingEdit);
