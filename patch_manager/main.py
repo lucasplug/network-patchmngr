@@ -258,6 +258,18 @@ class EntityMergeInput(TrimmedInput):
     target_entity_id: str
 
 
+class AttachSourceInput(TrimmedInput):
+    source_entity_id: str
+
+
+class ParentInput(TrimmedInput):
+    parent_entity_id: str | None = None
+
+
+class DismissSuggestionInput(TrimmedInput):
+    primary_entity_id: str
+
+
 class ProviderMappingInput(TrimmedInput):
     entity_id: str | None = None
 
@@ -745,6 +757,7 @@ def bootstrap(auth: AuthContext = Depends(current_auth)) -> dict[str, Any]:
                FROM provider_records pr JOIN providers p ON p.id=pr.provider_id
                LEFT JOIN entities e ON e.id=pr.entity_id ORDER BY p.name,pr.kind,pr.external_id"""
         ) if is_admin else [],
+        "link_suggestions": all_link_suggestions() if is_admin else {},
         "audit_log": database.fetch_all(
             """SELECT a.*,u.username FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id
                ORDER BY a.created_at DESC LIMIT 200"""
@@ -1040,7 +1053,69 @@ def discoveries(_: AuthContext = Depends(admin_auth)) -> list[dict[str, Any]]:
         # Een poortloze uplink telt net zo goed als toegewezen: het ding heeft
         # een plek gekregen, alleen zonder kabel.
         row["linked"] = row["id"] in linked or bool(row["uplink_device_id"]) or bool(row["monitor_for"])
+        row["suggested_primary"] = suggested_primary_for(row["id"], row["ip_address"])
     return rows
+
+
+def suggested_primary_for(entity_id: str, ip_address: str | None) -> dict[str, Any] | None:
+    """De ARP/DHCP-hoofdentiteit op hetzelfde IP, als koppelvoorstel.
+
+    De ARP/DHCP-bron (`kind='network_device'`) is per definitie de
+    hoofdentiteit; een discovery zonder eigen ARP-record (een Proxmox-VM, een
+    Uptime-monitor met datzelfde IP) kan eronder hangen. Puur een suggestie: de
+    gebruiker bevestigt met één klik. Eenrichting — een ARP-entiteit krijgt zelf
+    nooit een voorstel — en afgewezen voorstellen komen niet terug.
+    """
+    if not ip_address:
+        return None
+    return database.fetch_one(
+        """SELECT e.id, e.name, e.ip_address
+           FROM entities e
+           WHERE e.ip_address=? AND e.id<>? AND e.ignored=0 AND e.archived=0
+             AND EXISTS(SELECT 1 FROM provider_records pr
+                        WHERE pr.entity_id=e.id AND pr.kind='network_device')
+             AND NOT EXISTS(SELECT 1 FROM provider_records pr
+                            WHERE pr.entity_id=? AND pr.kind='network_device')
+             AND NOT EXISTS(SELECT 1 FROM link_dismissals d
+                            WHERE d.source_entity_id=? AND d.primary_entity_id=e.id)
+           ORDER BY (e.mac_address IS NOT NULL) DESC, e.name
+           LIMIT 1""",
+        (ip_address, entity_id, entity_id, entity_id),
+    )
+
+
+def all_link_suggestions() -> dict[str, dict[str, Any]]:
+    """Alle same-IP koppelvoorstellen in één query, voor de bootstrap.
+
+    Zelfde regels als `suggested_primary_for`: de ARP/DHCP-entiteit is de
+    hoofdentiteit, eenrichting, en afgewezen voorstellen tellen niet mee. Levert
+    per losse discovery de best passende hoofdentiteit (die met een MAC wint).
+    """
+    rows = database.fetch_all(
+        """SELECT src.id AS source_id, p.id AS primary_id, p.name AS primary_name,
+                  p.ip_address AS primary_ip, (p.mac_address IS NOT NULL) AS primary_has_mac
+           FROM entities src
+           JOIN entities p ON p.ip_address=src.ip_address AND p.id<>src.id
+                          AND p.ignored=0 AND p.archived=0
+           WHERE src.origin='discovered' AND src.ignored=0 AND src.archived=0
+             AND src.ip_address IS NOT NULL
+             AND EXISTS(SELECT 1 FROM provider_records pr
+                        WHERE pr.entity_id=p.id AND pr.kind='network_device')
+             AND NOT EXISTS(SELECT 1 FROM provider_records pr
+                            WHERE pr.entity_id=src.id AND pr.kind='network_device')
+             AND NOT EXISTS(SELECT 1 FROM link_dismissals d
+                            WHERE d.source_entity_id=src.id AND d.primary_entity_id=p.id)
+           ORDER BY src.id, primary_has_mac DESC, p.name""",
+        (),
+    )
+    suggestions: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row["source_id"] in suggestions:
+            continue  # eerste (beste) per bron wint dankzij de ORDER BY
+        suggestions[row["source_id"]] = {
+            "id": row["primary_id"], "name": row["primary_name"], "ip_address": row["primary_ip"]
+        }
+    return suggestions
 
 
 @app.post("/api/entities/{entity_id}/promote")
@@ -1228,6 +1303,125 @@ def merge_entity(entity_id: str, payload: EntityMergeInput, auth: AuthContext = 
         connection.execute("DELETE FROM entities WHERE id=?", (entity_id,))
     database.audit(auth.user_id, "entity.merge", "entity", entity_id, {"target_entity_id": target["id"], "source_name": source["name"]})
     return {"ok": True}
+
+
+@app.post("/api/entities/{primary_id}/attach-source")
+def attach_source(primary_id: str, payload: AttachSourceInput, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    """Koppel een losse discovery als databron onder een hoofdentiteit.
+
+    Dit is de 1-klik-bevestiging van een same-IP-voorstel. Onder water is het een
+    merge (de bron verhuist zijn provider-records, observaties, DNS- en
+    proxykoppelingen naar de hoofdentiteit en verdwijnt). De hoofdentiteit
+    (ARP/DHCP) blijft de overlever, zodat IP en MAC behouden blijven. Heeft die
+    nog geen eigen naam (naam == IP), dan neemt hij naam en type van de bron over
+    zodat er een leesbare hoofdentiteit ontstaat.
+    """
+    primary = database.fetch_one("SELECT * FROM entities WHERE id=?", (primary_id,))
+    source = database.fetch_one("SELECT * FROM entities WHERE id=?", (payload.source_entity_id,))
+    if not primary or not source:
+        raise HTTPException(404, "Bron- of hoofdentiteit niet gevonden")
+    if primary_id == source["id"]:
+        raise HTTPException(409, "Bron en hoofdentiteit zijn hetzelfde")
+    if not (primary["name"] or "").strip() or primary["name"] == primary["ip_address"]:
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE entities SET name=?,type=?,updated_at=? WHERE id=?",
+                (source["name"], source["type"] if primary["type"] == "device" else primary["type"], utcnow(), primary_id),
+            )
+    return merge_entity(source["id"], EntityMergeInput(target_entity_id=primary_id), auth)
+
+
+@app.put("/api/entities/{entity_id}/parent")
+def set_entity_parent(entity_id: str, payload: ParentInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Hang een databron als kind onder een hoofdentiteit (of maak los).
+
+    Anders dan samenvoegen blijft de databron een eigen entiteit; alleen zijn
+    plek in de boom verandert. Werkt ook voor discoveries, want dit raakt hun
+    handmatige velden niet. Kies parent_entity_id leeg om los te koppelen.
+    """
+    entity = database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,))
+    if not entity:
+        raise HTTPException(404, "Device niet gevonden")
+    parent_id = (payload.parent_entity_id or "").strip() or None
+    if parent_id:
+        if parent_id == entity_id:
+            raise HTTPException(409, "Een device kan niet onder zichzelf hangen")
+        if not database.fetch_one("SELECT id FROM entities WHERE id=?", (parent_id,)):
+            raise HTTPException(404, "Hoofdentiteit niet gevonden")
+        # Cyclus voorkomen: de nieuwe ouder mag geen afstammeling van dit device zijn.
+        ancestor_id, visited = parent_id, set()
+        while ancestor_id and ancestor_id not in visited:
+            if ancestor_id == entity_id:
+                raise HTTPException(409, "Dat zou een lus in de boom maken")
+            visited.add(ancestor_id)
+            ancestor = database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (ancestor_id,))
+            ancestor_id = ancestor["parent_id"] if ancestor else None
+    with database.transaction() as connection:
+        connection.execute("UPDATE entities SET parent_id=?,updated_at=? WHERE id=?", (parent_id, utcnow(), entity_id))
+    database.audit(auth.user_id, "entity.set_parent", "entity", entity_id, {"parent_entity_id": parent_id})
+    return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+
+
+@app.post("/api/entities/{entity_id}/dismiss-suggestion")
+def dismiss_suggestion(entity_id: str, payload: DismissSuggestionInput, auth: AuthContext = Depends(write_auth)) -> dict[str, bool]:
+    """Onthoud dat deze bron NIET hetzelfde apparaat is als het voorstel.
+
+    Zo verdwijnt de same-IP-suggestie en komt hij na een volgende sync niet
+    terug. De rij ruimt zichzelf op zodra een van beide entiteiten weg is.
+    """
+    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Device niet gevonden")
+    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (payload.primary_entity_id,)):
+        raise HTTPException(404, "Voorgestelde hoofdentiteit niet gevonden")
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO link_dismissals(id,source_entity_id,primary_entity_id,created_at)
+               VALUES(?,?,?,?) ON CONFLICT(source_entity_id,primary_entity_id) DO NOTHING""",
+            (str(uuid.uuid4()), entity_id, payload.primary_entity_id, utcnow()),
+        )
+    database.audit(auth.user_id, "entity.dismiss_suggestion", "entity", entity_id, payload.model_dump())
+    return {"ok": True}
+
+
+@app.get("/api/entities/{entity_id}/sources")
+def entity_sources(entity_id: str, _: AuthContext = Depends(admin_auth)) -> dict[str, Any]:
+    """De databronnen onder een hoofdentiteit, voor het detailpaneel.
+
+    Bundelt de provider-records (met providernaam en de laatst waargenomen
+    status), de gekoppelde AdGuard-rewrites en NPM-proxyhosts. Zo zie je in één
+    oogopslag 'Plugmox via Proxmox API', 'AdGuard rewrite', 'Uptime'.
+    """
+    if not database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,)):
+        raise HTTPException(404, "Device niet gevonden")
+    provider_records = database.fetch_all(
+        """SELECT pr.id,pr.kind,pr.external_id,pr.last_seen_at,p.name AS provider_name,p.type AS provider_type,
+                  (SELECT o.value_json FROM observations o
+                     WHERE o.entity_id=pr.entity_id AND o.provider_id=pr.provider_id AND o.field='status'
+                     ORDER BY o.observed_at DESC LIMIT 1) AS status_json
+           FROM provider_records pr JOIN providers p ON p.id=pr.provider_id
+           WHERE pr.entity_id=? ORDER BY p.name,pr.kind""",
+        (entity_id,),
+    )
+    for record in provider_records:
+        raw = record.pop("status_json", None)
+        record["status"] = json.loads(raw) if raw else None
+    dns_records = database.fetch_all(
+        "SELECT id,name,record_type,value,source FROM dns_records WHERE entity_id=? ORDER BY name", (entity_id,)
+    )
+    proxy_hosts = database.fetch_all(
+        """SELECT id,forward_host,forward_port,source FROM proxy_hosts
+           WHERE entity_id=? OR service_entity_id=? ORDER BY forward_host""",
+        (entity_id, entity_id),
+    )
+    monitor_for = database.fetch_all(
+        "SELECT id,name FROM physical_devices WHERE monitor_entity_id=?", (entity_id,)
+    )
+    return {
+        "provider_records": provider_records,
+        "dns_records": dns_records,
+        "proxy_hosts": proxy_hosts,
+        "monitor_for": monitor_for,
+    }
 
 
 def entity_deletion_impact(entity_id: str) -> dict[str, Any]:

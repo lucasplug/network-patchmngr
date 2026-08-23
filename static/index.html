@@ -129,6 +129,10 @@
           <div id="providers-grid" class="providers-grid"></div>
           <div class="section-bar with-space"><span>Recente veranderingen</span><span class="muted"><select id="changes-days" aria-label="Periode"><option value="1">24 uur</option><option value="7" selected>7 dagen</option><option value="30">30 dagen</option></select></span></div>
           <div id="changes-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Hoofdentiteiten &amp; databronnen</span><span class="muted" id="primary-count"></span></div>
+          <div id="primary-entities-list" class="data-list"></div>
+          <div class="section-bar with-space"><span>Niet-gekoppelde databronnen</span><span class="muted" id="loose-source-count"></span></div>
+          <div id="loose-sources-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Niet-gekoppelde discoveries</span><span class="muted" id="unlinked-count"></span></div>
           <div id="discoveries-list" class="data-list"></div>
           <div class="section-bar with-space"><span>Hangt aan een netwerkapparaat (geen poort)</span><span class="muted" id="uplink-count"></span></div>
@@ -280,6 +284,8 @@
 
   <dialog id="merge-dialog" class="modal glass" aria-labelledby="merge-title"><form id="merge-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Discovery samenvoegen</p><h2 id="merge-title">Device samenvoegen</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><input type="hidden" name="source_entity_id"><label>Doeldevice<select name="target_entity_id" required></select></label><p class="muted tiny">Providerrecords, observaties, DNS- en proxykoppelingen verhuizen naar het doel. De discovery wordt daarna verwijderd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Samenvoegen</button></div></form></dialog>
 
+  <dialog id="parent-dialog" class="modal glass" aria-labelledby="parent-title"><form id="parent-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Databron koppelen</p><h2 id="parent-title">Onder hoofdentiteit hangen</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><input type="hidden" name="source_entity_id"><label>Hoofdentiteit<select name="parent_entity_id" required></select></label><p class="muted tiny">De databron blijft een eigen entiteit en gaat als kind onder de gekozen hoofdentiteit hangen. Niets wordt verwijderd of samengevoegd.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppelen</button></div></form></dialog>
+
   <dialog id="mapping-dialog" class="modal glass" aria-labelledby="mapping-dialog-title"><form id="mapping-form" class="stack"><div class="modal-head"><div><p class="eyebrow">Providerrecord</p><h2 id="mapping-dialog-title">Expliciete koppeling</h2></div><button type="button" class="icon-button modal-close" aria-label="Dialoog sluiten" title="Sluiten">×</button></div><input type="hidden" name="record_id"><label>Gekoppeld device<select name="entity_id"><option value="">Niet gekoppeld</option></select></label><p class="muted tiny">De volgende synchronisatie gebruikt deze expliciete koppeling. Kies ‘Niet gekoppeld’ om hem los te maken.</p><div class="modal-actions"><button type="button" class="button modal-close">Annuleren</button><button class="button primary" type="submit">Koppeling opslaan</button></div></form></dialog>
 
   <dialog id="entity-drawer" class="drawer" aria-labelledby="entity-drawer-title">
@@ -290,6 +296,7 @@
     <div class="drawer-body">
       <div class="fact-grid" id="entity-drawer-facts"></div>
       <div id="entity-drawer-cable"></div>
+      <div id="entity-drawer-sources"></div>
       <div id="entity-drawer-history"></div>
     </div>
   </dialog>

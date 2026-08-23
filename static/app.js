@@ -576,6 +576,29 @@ function renderAdmin() {
   const uplinked = state.data.entities.filter(entity => entity.uplink_device_id && !entity.ignored && !entity.archived);
   const deviceName = id => state.data.physical_devices.find(device => device.id === id)?.name || "onbekend apparaat";
   const inactive = state.data.entities.filter(entity => entity.origin === "discovered" && (entity.ignored || entity.archived));
+  const suggestions = state.data.link_suggestions || {};
+  // Hoofdentiteiten (anchors) versus losse databronnen. Een anchor is een echt
+  // apparaat: handmatig aangemaakt, met een MAC, of gezien door ARP/DHCP
+  // (kind='network_device'). Een losse databron is een discovery zonder eigen
+  // ARP-verankering (een Proxmox-VM, een Uptime-monitor) die eronder hoort.
+  const recordsByEntity = {};
+  for (const record of (state.data.provider_records || [])) {
+    if (record.entity_id) (recordsByEntity[record.entity_id] ||= []).push(record);
+  }
+  // Een entiteit die zelf ouder is (containers/VM's hangen eronder) is een
+  // hoofdentiteit, ook zonder MAC — denk aan Docker-runtime.
+  const parentIds = new Set(state.data.entities.map(entity => entity.parent_id).filter(Boolean));
+  const isAnchor = entity => !entity.ignored && !entity.archived
+    && (entity.origin === "manual" || Boolean(entity.mac_address) || parentIds.has(entity.id)
+        || (recordsByEntity[entity.id] || []).some(record => record.kind === "network_device"));
+  const anchors = state.data.entities.filter(isAnchor)
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  // Losse databron = een discovery die nergens onder hangt (geen ouder) én zelf
+  // geen hoofdentiteit is. Iets dat al onder een host hangt (een container onder
+  // Docker-runtime, een NPM-service onder zijn backend) telt dus niet mee.
+  const looseSources = state.data.entities.filter(entity =>
+    entity.origin === "discovered" && !entity.ignored && !entity.archived
+    && !isAnchor(entity) && !entity.parent_id);
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
@@ -587,9 +610,31 @@ function renderAdmin() {
           ? `<button type="button" class="button danger" data-provider-delete="${provider.id}">Verwijder</button>` : ""}</div>
     </article>`;
   }).join("");
+  $("#primary-count").textContent = `${anchors.length} hoofdentiteiten`;
+  $("#primary-entities-list").innerHTML = anchors.length ? anchors.map(entity => {
+    const sources = recordsByEntity[entity.id] || [];
+    const sourceHtml = sources.length
+      ? `<div class="source-list">${sources.map(source => `<div class="source-item"><span class="source-dot">${statusDot(entity.status)}</span><div class="source-main"><strong>${esc(source.provider_name)}</strong><span>${esc(source.kind)} · ${esc(source.external_id)}</span></div></div>`).join("")}</div>`
+      : `<p class="muted tiny source-empty">Nog geen databronnen gekoppeld.</p>`;
+    return `<div class="data-row primary-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.ip_address || entity.hostname || "—")}</span></div></div><div><span class="data-cell-label">Databronnen</span><br>${sources.length}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-entity-open="${entity.id}">Openen</button></div>${sourceHtml}</div>`;
+  }).join("") : `<div class="empty-state">Nog geen hoofdentiteiten.</div>`;
+  $("#loose-source-count").textContent = `${looseSources.length} losse bronnen`;
+  $("#loose-sources-list").innerHTML = looseSources.length ? looseSources.map(entity => {
+    const suggestion = suggestions[entity.id];
+    const source = (recordsByEntity[entity.id] || []).map(record => record.provider_name).join(", ") || "onbekende bron";
+    const action = suggestion
+      ? `<button type="button" class="button primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel aan ${esc(suggestion.name)}</button>`
+      : `<button type="button" class="button" data-parent-entity="${entity.id}">Koppel aan…</button>`;
+    return `<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(source)} · ${esc(categoryLabel(entity.type))}</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions">${action}</div></div>`;
+  }).join("") : `<div class="empty-state">Alle databronnen hangen onder een hoofdentiteit.</div>`;
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
-  $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => `
-    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div></div>`).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
+  $("#discoveries-list").innerHTML = unlinked.length ? unlinked.map(entity => {
+    const suggestion = suggestions[entity.id];
+    const suggestionHtml = suggestion ? `
+      <div class="link-suggestion" role="note"><span class="link-suggestion-text">Waarschijnlijk dezelfde als <strong>${esc(suggestion.name)}</strong>${suggestion.ip_address ? ` · ${esc(suggestion.ip_address)}` : ""}</span><div class="link-suggestion-actions"><button type="button" class="button micro primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel als databron</button><button type="button" class="button micro" data-dismiss-suggestion="${entity.id}" data-dismiss-primary="${suggestion.id}">Los laten</button></div></div>` : "";
+    return `
+    <div class="data-row discovery-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))}${entity.vendor ? ` · ${esc(entity.vendor)}` : ""} · discovery</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions"><button type="button" class="button" data-link-entity="${entity.id}">Poort</button><button type="button" class="button" data-merge-entity="${entity.id}">Samenvoegen</button><button type="button" class="button" data-discovery-state="ignore" data-entity-id="${entity.id}">Negeer</button><button type="button" class="button" data-discovery-state="archive" data-entity-id="${entity.id}">Archiveer</button></div>${suggestionHtml}</div>`;
+  }).join("") : `<div class="empty-state">Geen ongekoppelde discoveries.</div>`;
   $("#uplink-count").textContent = `${uplinked.length} gekoppeld`;
   $("#uplinks-list").innerHTML = uplinked.length ? uplinked.map(entity => `
     <div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(categoryLabel(entity.type))} · ${esc(entity.origin === "manual" ? "handmatig" : "discovery")}</span></div></div><div><span class="data-cell-label">Hangt aan</span><br>${esc(deviceName(entity.uplink_device_id))}</div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><button type="button" class="button" data-uplink-clear="${esc(entity.id)}">Loskoppelen</button></div>`).join("") : `<div class="empty-state">Niets hangt zonder poort aan een netwerkapparaat.</div>`;
@@ -1120,6 +1165,7 @@ function openPhysical(deviceId=""){
 }
 
 function openMerge(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#merge-form");form.elements.source_entity_id.value=entityId;$("#merge-title").textContent=`${source?.name||"Discovery"} samenvoegen`;form.elements.target_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("");$("#merge-dialog").showModal();}
+function openParent(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#parent-form");form.elements.source_entity_id.value=entityId;$("#parent-title").textContent=`${source?.name||"Databron"} onder hoofdentiteit hangen`;form.elements.parent_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived&&!item.ignored).sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(categoryLabel(item.type))}${item.ip_address?` · ${esc(item.ip_address)}`:""}</option>`).join("");$("#parent-dialog").showModal();}
 function openMapping(recordId){const record=state.data.provider_records.find(item=>item.id===recordId),form=$("#mapping-form");form.elements.record_id.value=recordId;form.elements.entity_id.innerHTML=`<option value="">Niet gekoppeld</option>${state.data.entities.filter(item=>!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("")}`;form.elements.entity_id.value=record?.entity_id||"";$("#mapping-dialog").showModal();}
 
 function nodeOptions(selected="", exclude="") {
@@ -1271,8 +1317,10 @@ document.addEventListener("click", async event => {
   const entityDelete=event.target.closest("[data-entity-delete]");if(entityDelete)confirmDeletion("entity",entityDelete.dataset.entityDelete);
   const physicalDelete=event.target.closest("[data-physical-delete]");if(physicalDelete)confirmDeletion("physical",physicalDelete.dataset.physicalDelete);
   const entityEdit=event.target.closest("[data-entity-edit]");if(entityEdit)openEntity(entityEdit.dataset.entityEdit);
+  const entityOpen=event.target.closest("[data-entity-open]");if(entityOpen)openEntityDrawer(entityOpen.dataset.entityOpen);
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
+  const parent=event.target.closest("[data-parent-entity]");if(parent)openParent(parent.dataset.parentEntity);
   const mapping=event.target.closest("[data-mapping-edit]");if(mapping)openMapping(mapping.dataset.mappingEdit);
   const providerDelete=event.target.closest("[data-provider-delete]");
   if(providerDelete){
@@ -1293,6 +1341,12 @@ document.addEventListener("click", async event => {
   if(uplinkClear){const id=uplinkClear.dataset.uplinkClear;try{await api(`/api/entities/${encodeURIComponent(id)}/uplink`,{method:"PUT",body:JSON.stringify({physical_device_id:null})});await loadData(true);toast("Losgekoppeld");}catch(error){toast(error.message,"error");}}
   const discovery=event.target.closest("[data-discovery-state]");
   if(discovery){const mode=discovery.dataset.discoveryState,payload=mode==="ignore"?{ignored:true,archived:false}:mode==="archive"?{ignored:false,archived:true}:{ignored:false,archived:false};try{await api(`/api/entities/${discovery.dataset.entityId}/discovery-state`,{method:"PATCH",body:JSON.stringify(payload)});await loadData(true);toast(mode==="restore"?"Discovery hersteld":mode==="ignore"?"Discovery genegeerd":"Discovery gearchiveerd");}catch(error){toast(error.message,"error");}}
+  const attach=event.target.closest("[data-attach-source]");
+  if(attach){try{await api(`/api/entities/${encodeURIComponent(attach.dataset.attachPrimary)}/attach-source`,{method:"POST",body:JSON.stringify({source_entity_id:attach.dataset.attachSource})});await loadData(true);toast("Databron gekoppeld aan hoofdentiteit");}catch(error){toast(error.message,"error");}}
+  const dismiss=event.target.closest("[data-dismiss-suggestion]");
+  if(dismiss){try{await api(`/api/entities/${encodeURIComponent(dismiss.dataset.dismissSuggestion)}/dismiss-suggestion`,{method:"POST",body:JSON.stringify({primary_entity_id:dismiss.dataset.dismissPrimary})});await loadData(true);toast("Voorstel losgelaten");}catch(error){toast(error.message,"error");}}
+  const detach=event.target.closest("[data-detach-record]");
+  if(detach){try{await api(`/api/provider-records/${encodeURIComponent(detach.dataset.detachRecord)}/mapping`,{method:"PATCH",body:JSON.stringify({entity_id:null})});await loadData(true);if(state.openEntityId)renderEntitySources(state.openEntityId);toast("Databron ontkoppeld");}catch(error){toast(error.message,"error");}}
   const restore=event.target.closest("[data-backup-restore]");if(restore){const name=restore.dataset.backupRestore;if(await confirmAction({title:"Back-up terugzetten?",message:`${name} wordt teruggezet. De huidige database wordt eerst automatisch veiliggesteld; je sessie kan daarna verlopen.`,confirmLabel:"Back-up herstellen"})){try{await api(`/api/backups/${encodeURIComponent(name)}/restore?confirm=${encodeURIComponent(name)}`,{method:"POST"});toast("Back-up hersteld; app wordt herladen");setTimeout(()=>location.reload(),800);}catch(error){toast(error.message,"error");}}}
 });
 
@@ -1451,6 +1505,7 @@ $("#backup-now").addEventListener("click", async event => {
 });
 
 $("#merge-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),source=payload.source_entity_id;delete payload.source_entity_id;try{await api(`/api/entities/${source}/merge`,{method:"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Discovery samengevoegd");}catch(error){toast(error.message,"error");}});
+$("#parent-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,source=form.elements.source_entity_id.value,parentId=form.elements.parent_entity_id.value;try{await api(`/api/entities/${encodeURIComponent(source)}/parent`,{method:"PUT",body:JSON.stringify({parent_entity_id:parentId})});form.closest("dialog").close();await loadData(true);toast("Databron als kind gekoppeld");}catch(error){toast(error.message,"error");}});
 $("#mapping-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),recordId=payload.record_id;delete payload.record_id;payload.entity_id=payload.entity_id||null;try{await api(`/api/provider-records/${recordId}/mapping`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Bronkoppeling opgeslagen");}catch(error){toast(error.message,"error");}});
 
 $("#topology-edit").addEventListener("click",()=>{state.editingTopology=true;state.selectedNodes.clear();$("#topology-editbar").classList.remove("hidden");$("#topology-edit").classList.add("hidden");renderTopology();});
@@ -1901,6 +1956,35 @@ function uptimeBar(days) {
   }).join("")}</div>`;
 }
 
+async function renderEntitySources(entityId) {
+  // De databronnen onder deze hoofdentiteit: providerrecords, AdGuard-rewrites,
+  // NPM-proxyhosts en of hij ergens de statusmonitor is. Alleen voor beheerders;
+  // een kijker mag dit endpoint niet en ziet het blok niet.
+  const container = $("#entity-drawer-sources");
+  if (!container) return;
+  if (state.role !== "admin") { container.innerHTML = ""; return; }
+  container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span><p class="muted tiny">laden…</p>`;
+  try {
+    const data = await api(`/api/entities/${encodeURIComponent(entityId)}/sources`);
+    const items = [];
+    for (const record of data.provider_records) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot(record.status)}</span><div class="source-main"><strong>${esc(record.provider_name)}</strong><span>${esc(record.kind)} · ${esc(record.external_id)}${record.last_seen_at ? ` · ${esc(formatTime(record.last_seen_at))}` : ""}</span></div><button type="button" class="button micro" data-detach-record="${esc(record.id)}">Ontkoppel</button></div>`);
+    }
+    for (const dns of data.dns_records) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>DNS · ${esc(dns.source)}</strong><span>${esc(dns.name)} → ${esc(dns.value)}</span></div></div>`);
+    }
+    for (const proxy of data.proxy_hosts) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>Proxy · ${esc(proxy.source)}</strong><span>${esc(proxy.forward_host)}:${esc(proxy.forward_port)}</span></div></div>`);
+    }
+    for (const device of data.monitor_for) {
+      items.push(`<div class="source-item"><span class="source-dot">${statusDot("unknown")}</span><div class="source-main"><strong>Statusmonitor</strong><span>${esc(device.name)}</span></div></div>`);
+    }
+    container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span>${items.length ? `<div class="source-list">${items.join("")}</div>` : `<p class="muted tiny">Nog geen databronnen. Koppel er een via ‘Expliciete bronkoppelingen’ bij Databronnen.</p>`}`;
+  } catch (error) {
+    container.innerHTML = `<span class="data-cell-label">Gekoppelde databronnen</span><p class="muted tiny">${esc(error.message)}</p>`;
+  }
+}
+
 async function openEntityDrawer(entityId) {
   const entity = state.data.entities.find(item => item.id === entityId);
   if (!entity) return;
@@ -1914,6 +1998,8 @@ async function openEntityDrawer(entityId) {
   $("#entity-drawer-cable").innerHTML = port
     ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button type="button" class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
+  state.openEntityId = entityId;
+  renderEntitySources(entityId);
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
   const drawer = $("#entity-drawer");
   entityDrawerReturnFocus = document.activeElement;
