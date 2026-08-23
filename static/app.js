@@ -587,6 +587,9 @@ function renderAdmin() {
   // Een entiteit die zelf ouder is (containers/VM's hangen eronder) is een
   // hoofdentiteit, ook zonder MAC — denk aan Docker-runtime.
   const parentIds = new Set(state.data.entities.map(entity => entity.parent_id).filter(Boolean));
+  const activeEntityIds = new Set(state.data.entities
+    .filter(entity => !entity.ignored && !entity.archived)
+    .map(entity => entity.id));
   const isAnchor = entity => !entity.ignored && !entity.archived
     && (entity.origin === "manual" || Boolean(entity.mac_address) || parentIds.has(entity.id)
         || (recordsByEntity[entity.id] || []).some(record => record.kind === "network_device"));
@@ -597,7 +600,7 @@ function renderAdmin() {
   // Docker-runtime, een NPM-service onder zijn backend) telt dus niet mee.
   const looseSources = state.data.entities.filter(entity =>
     entity.origin === "discovered" && !entity.ignored && !entity.archived
-    && !isAnchor(entity) && !entity.parent_id);
+    && !isAnchor(entity) && (!entity.parent_id || !activeEntityIds.has(entity.parent_id)));
   $("#providers-grid").innerHTML = state.data.providers.map(provider => {
     const status = provider.last_error ? "error" : provider.last_success_at ? "ok" : "idle";
     return `<article class="provider-card">
@@ -2010,7 +2013,10 @@ async function openEntityDrawer(entityId) {
     ? `<span class="data-cell-label">Kabel</span><br>${esc(port.cable_label || "zonder label")} · <button type="button" class="button micro" data-open-port="${esc(port.id)}" data-open-device="${esc(port.physical_device_id)}">poort openen</button>`
     : `<span class="muted tiny">Niet aan een poort gekoppeld.</span>`;
   const parentEntity = entity.parent_id ? state.data.entities.find(item => item.id === entity.parent_id) : null;
-  $("#entity-drawer-parent").innerHTML = `<span class="data-cell-label">Hangt onder</span><br>${parentEntity ? esc(parentEntity.name) : '<span class="muted tiny">geen hoofdentiteit</span>'} · <button type="button" class="button micro" data-parent-entity="${esc(entityId)}">Kies…</button>${entity.parent_id ? ` <button type="button" class="button micro" data-parent-clear="${esc(entityId)}">Loskoppelen</button>` : ""}`;
+  const parentActions = canWrite()
+    ? ` · <button type="button" class="button micro" data-parent-entity="${esc(entityId)}">Kies…</button>${entity.parent_id ? ` <button type="button" class="button micro" data-parent-clear="${esc(entityId)}">Loskoppelen</button>` : ""}`
+    : "";
+  $("#entity-drawer-parent").innerHTML = `<span class="data-cell-label">Hangt onder</span><br>${parentEntity ? esc(parentEntity.name) : '<span class="muted tiny">geen hoofdentiteit</span>'}${parentActions}`;
   state.openEntityId = entityId;
   renderEntitySources(entityId);
   $("#entity-drawer-history").innerHTML = `<span class="muted tiny">historie laden…</span>`;
