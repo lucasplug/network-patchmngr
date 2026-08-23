@@ -388,6 +388,40 @@ def test_dismissed_suggestion_does_not_return() -> None:
         assert rows[source_id]["suggested_primary"] is None
 
 
+def test_couple_source_as_child_keeps_entity() -> None:
+    with TestClient(app) as client:
+        headers = login_headers(client)
+        host = client.post(
+            "/api/entities", headers=headers,
+            json={"name": "Docker-runtime", "type": "host", "ip_address": "192.168.100.90", "notes": ""},
+        ).json()
+        service_id = providers._store_record(
+            "nginx-proxy-manager", "proxy:5", "proxy_host", {"id": 5},
+            name="npm.home.lucasplug.net", entity_type="service", status="up",
+        )
+        coupled = client.put(
+            f"/api/entities/{service_id}/parent", headers=headers,
+            json={"parent_entity_id": host["id"]},
+        )
+        assert coupled.status_code == 200, coupled.text
+        # De databron blijft een eigen entiteit en hangt nu als kind onder de host.
+        service = database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (service_id,))
+        assert service is not None
+        assert service["parent_id"] == host["id"]
+        # Een lus wordt geweigerd.
+        loop = client.put(
+            f"/api/entities/{host['id']}/parent", headers=headers,
+            json={"parent_entity_id": service_id},
+        )
+        assert loop.status_code == 409
+        # Loskoppelen kan met een lege ouder.
+        detach = client.put(
+            f"/api/entities/{service_id}/parent", headers=headers, json={"parent_entity_id": None},
+        )
+        assert detach.status_code == 200
+        assert database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (service_id,))["parent_id"] is None
+
+
 def test_topology_grouping_delete_and_undo() -> None:
     with TestClient(app) as client:
         csrf = client.post(

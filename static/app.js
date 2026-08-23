@@ -624,7 +624,7 @@ function renderAdmin() {
     const source = (recordsByEntity[entity.id] || []).map(record => record.provider_name).join(", ") || "onbekende bron";
     const action = suggestion
       ? `<button type="button" class="button primary" data-attach-source="${entity.id}" data-attach-primary="${suggestion.id}">Koppel aan ${esc(suggestion.name)}</button>`
-      : `<button type="button" class="button" data-merge-entity="${entity.id}">Koppel aan…</button>`;
+      : `<button type="button" class="button" data-parent-entity="${entity.id}">Koppel aan…</button>`;
     return `<div class="data-row"><div class="data-main"><span class="data-icon">${entityIcon(entity.type)}</span><div><strong>${esc(entity.name)}</strong><span>${esc(source)} · ${esc(categoryLabel(entity.type))}</span></div></div><div><span class="data-cell-label">Adres</span><br>${esc(entity.ip_address || entity.hostname || "—")}</div><div><span class="data-cell-label">Status</span><br>${statusDot(entity.status)} ${esc(statusLabel(entity.status))}</div><div class="row-actions">${action}</div></div>`;
   }).join("") : `<div class="empty-state">Alle databronnen hangen onder een hoofdentiteit.</div>`;
   $("#unlinked-count").textContent = `${unlinked.length} gevonden`;
@@ -1165,6 +1165,7 @@ function openPhysical(deviceId=""){
 }
 
 function openMerge(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#merge-form");form.elements.source_entity_id.value=entityId;$("#merge-title").textContent=`${source?.name||"Discovery"} samenvoegen`;form.elements.target_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("");$("#merge-dialog").showModal();}
+function openParent(entityId){const source=state.data.entities.find(item=>item.id===entityId),form=$("#parent-form");form.elements.source_entity_id.value=entityId;$("#parent-title").textContent=`${source?.name||"Databron"} onder hoofdentiteit hangen`;form.elements.parent_entity_id.innerHTML=state.data.entities.filter(item=>item.id!==entityId&&!item.archived&&!item.ignored).sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(categoryLabel(item.type))}${item.ip_address?` · ${esc(item.ip_address)}`:""}</option>`).join("");$("#parent-dialog").showModal();}
 function openMapping(recordId){const record=state.data.provider_records.find(item=>item.id===recordId),form=$("#mapping-form");form.elements.record_id.value=recordId;form.elements.entity_id.innerHTML=`<option value="">Niet gekoppeld</option>${state.data.entities.filter(item=>!item.archived).map(item=>`<option value="${item.id}">${esc(item.name)} · ${esc(item.origin)}</option>`).join("")}`;form.elements.entity_id.value=record?.entity_id||"";$("#mapping-dialog").showModal();}
 
 function nodeOptions(selected="", exclude="") {
@@ -1319,6 +1320,7 @@ document.addEventListener("click", async event => {
   const entityOpen=event.target.closest("[data-entity-open]");if(entityOpen)openEntityDrawer(entityOpen.dataset.entityOpen);
   const physicalEdit=event.target.closest("[data-physical-edit]");if(physicalEdit)openPhysical(physicalEdit.dataset.physicalEdit);
   const merge=event.target.closest("[data-merge-entity]");if(merge)openMerge(merge.dataset.mergeEntity);
+  const parent=event.target.closest("[data-parent-entity]");if(parent)openParent(parent.dataset.parentEntity);
   const mapping=event.target.closest("[data-mapping-edit]");if(mapping)openMapping(mapping.dataset.mappingEdit);
   const providerDelete=event.target.closest("[data-provider-delete]");
   if(providerDelete){
@@ -1503,6 +1505,7 @@ $("#backup-now").addEventListener("click", async event => {
 });
 
 $("#merge-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),source=payload.source_entity_id;delete payload.source_entity_id;try{await api(`/api/entities/${source}/merge`,{method:"POST",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Discovery samengevoegd");}catch(error){toast(error.message,"error");}});
+$("#parent-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,source=form.elements.source_entity_id.value,parentId=form.elements.parent_entity_id.value;try{await api(`/api/entities/${encodeURIComponent(source)}/parent`,{method:"PUT",body:JSON.stringify({parent_entity_id:parentId})});form.closest("dialog").close();await loadData(true);toast("Databron als kind gekoppeld");}catch(error){toast(error.message,"error");}});
 $("#mapping-form").addEventListener("submit",async event=>{event.preventDefault();const form=event.currentTarget,payload=Object.fromEntries(new FormData(form)),recordId=payload.record_id;delete payload.record_id;payload.entity_id=payload.entity_id||null;try{await api(`/api/provider-records/${recordId}/mapping`,{method:"PATCH",body:JSON.stringify(payload)});form.closest("dialog").close();await loadData(true);toast("Bronkoppeling opgeslagen");}catch(error){toast(error.message,"error");}});
 
 $("#topology-edit").addEventListener("click",()=>{state.editingTopology=true;state.selectedNodes.clear();$("#topology-editbar").classList.remove("hidden");$("#topology-edit").classList.add("hidden");renderTopology();});

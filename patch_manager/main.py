@@ -262,6 +262,10 @@ class AttachSourceInput(TrimmedInput):
     source_entity_id: str
 
 
+class ParentInput(TrimmedInput):
+    parent_entity_id: str | None = None
+
+
 class DismissSuggestionInput(TrimmedInput):
     primary_entity_id: str
 
@@ -1325,6 +1329,37 @@ def attach_source(primary_id: str, payload: AttachSourceInput, auth: AuthContext
                 (source["name"], source["type"] if primary["type"] == "device" else primary["type"], utcnow(), primary_id),
             )
     return merge_entity(source["id"], EntityMergeInput(target_entity_id=primary_id), auth)
+
+
+@app.put("/api/entities/{entity_id}/parent")
+def set_entity_parent(entity_id: str, payload: ParentInput, auth: AuthContext = Depends(write_auth)) -> dict[str, Any]:
+    """Hang een databron als kind onder een hoofdentiteit (of maak los).
+
+    Anders dan samenvoegen blijft de databron een eigen entiteit; alleen zijn
+    plek in de boom verandert. Werkt ook voor discoveries, want dit raakt hun
+    handmatige velden niet. Kies parent_entity_id leeg om los te koppelen.
+    """
+    entity = database.fetch_one("SELECT id FROM entities WHERE id=?", (entity_id,))
+    if not entity:
+        raise HTTPException(404, "Device niet gevonden")
+    parent_id = (payload.parent_entity_id or "").strip() or None
+    if parent_id:
+        if parent_id == entity_id:
+            raise HTTPException(409, "Een device kan niet onder zichzelf hangen")
+        if not database.fetch_one("SELECT id FROM entities WHERE id=?", (parent_id,)):
+            raise HTTPException(404, "Hoofdentiteit niet gevonden")
+        # Cyclus voorkomen: de nieuwe ouder mag geen afstammeling van dit device zijn.
+        ancestor_id, visited = parent_id, set()
+        while ancestor_id and ancestor_id not in visited:
+            if ancestor_id == entity_id:
+                raise HTTPException(409, "Dat zou een lus in de boom maken")
+            visited.add(ancestor_id)
+            ancestor = database.fetch_one("SELECT parent_id FROM entities WHERE id=?", (ancestor_id,))
+            ancestor_id = ancestor["parent_id"] if ancestor else None
+    with database.transaction() as connection:
+        connection.execute("UPDATE entities SET parent_id=?,updated_at=? WHERE id=?", (parent_id, utcnow(), entity_id))
+    database.audit(auth.user_id, "entity.set_parent", "entity", entity_id, {"parent_entity_id": parent_id})
+    return database.fetch_one("SELECT * FROM entities WHERE id=?", (entity_id,))
 
 
 @app.post("/api/entities/{entity_id}/dismiss-suggestion")
